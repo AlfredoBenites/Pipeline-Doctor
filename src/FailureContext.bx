@@ -11,22 +11,39 @@ class {
 
         failureOutput = commandResult.combinedOutput;
 
-        // A Java stack trace only ever prints the bare file name and line, e.g. "App.java:4".
-        // We use it to confirm WHICH file failed and on what line, but it can never give us
-        // the repository-relative path -- that has to come from the configuration.
-        match = reFind(
-            "([A-Za-z0-9_]+\.java):([0-9]+)",
-            failureOutput,
-            1,
-            true
-        );
+        // We already know which file we are permitted to repair, so rather than parsing a
+        // language-specific stack trace we simply confirm the failure output mentions that
+        // file, then pull out a line number if one is nearby. This works for Java
+        // ("App.java:4"), Python ('File "src/app.py", line 3'), Node, Ruby and friends.
+        sourceFileName = getFileFromPath( config.sourceFile ?: config.arguments[ 1 ] );
+        escapedName    = reReplace( sourceFileName, "([.\[\]{}()*+?^$|\\])", "\\\1", "all" );
+
+        mentioned  = reFindNoCase( escapedName, failureOutput ) > 0;
+        lineNumber = "";
+
+        // "App.java:4"  /  "app.js:12"
+        lineMatch = reFind( escapedName & "[""'\)]?:([0-9]+)", failureOutput, 1, true );
+        if ( arrayLen( lineMatch.match ) >= 2 ) {
+            lineNumber = lineMatch.match[ 2 ];
+        } else {
+            // 'File "src/app.py", line 3'
+            lineMatch = reFindNoCase( escapedName & "[""']?,\s*line\s+([0-9]+)", failureOutput, 1, true );
+            if ( arrayLen( lineMatch.match ) >= 2 ) {
+                lineNumber = lineMatch.match[ 2 ];
+            }
+        }
 
         // The path we are actually allowed to repair, straight from pipeline-doctor.json.
         // Deliberately not hardcoded so this class stays reusable across target repositories.
-        relativeSourcePath = config.arguments[ 1 ];
+        //
+        // Prefer an explicit "sourceFile" setting. Falling back to arguments[1] only works
+        // when the command IS the source file (e.g. `java src/App.java`); it breaks for
+        // build tools and classpath invocations like `mvn test` or `java -cp out Main`,
+        // where argument 1 is "test" or "-cp" rather than a path.
+        relativeSourcePath = config.sourceFile ?: config.arguments[ 1 ];
         sourcePath         = repoPath & "/" & relativeSourcePath;
 
-        if ( arrayLen( match.match ) < 3 ) {
+        if ( !mentioned ) {
             return {
                 repoPath          : repoPath,
                 failureOutput     : failureOutput,
@@ -35,12 +52,10 @@ class {
                 lineNumber        : "",
                 relativeSourcePath: relativeSourcePath,
                 contextFound      : false,
-                reason            : "No Java source reference found in the failure output."
+                reason            : "The failure output does not mention the configured source file (" &
+                    relativeSourcePath & "), so the failure is probably in a different file."
             };
         }
-
-        fileName   = match.match[ 2 ];
-        lineNumber = match.match[ 3 ];
 
         fileExtension = listLast( relativeSourcePath, "." );
 
@@ -54,22 +69,6 @@ class {
                 relativeSourcePath: relativeSourcePath,
                 contextFound      : false,
                 reason            : "File extension is not allowed: " & fileExtension
-            };
-        }
-
-        // The stack trace names a file; make sure it is the one the configuration points at,
-        // otherwise we would be repairing something the operator never permitted.
-        if ( getFileFromPath( relativeSourcePath ) != fileName ) {
-            return {
-                repoPath          : repoPath,
-                failureOutput     : failureOutput,
-                candidateFiles    : [],
-                sourceSnippets    : {},
-                lineNumber        : lineNumber,
-                relativeSourcePath: relativeSourcePath,
-                contextFound      : false,
-                reason            : "Failure points at " & fileName &
-                    ", but the configured source file is " & relativeSourcePath & "."
             };
         }
 
@@ -99,6 +98,7 @@ class {
             },
             lineNumber        : lineNumber,
             relativeSourcePath: relativeSourcePath,
+            allowedExtensions : config.allowedExtensions,
             contextFound      : true
         };
 

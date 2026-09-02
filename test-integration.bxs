@@ -134,6 +134,48 @@ check( "stops when not on the base branch", r4.status == "stopped" && ( r4.stage
 r5 = new src.Pipeline().run( makeRepo( WORKING, CONFIG_JSON ), true );
 check( "stops when the command already succeeds", r5.status == "stopped" && ( r5.stage ?: "" ) == "reproduce", r5.stage ?: "" );
 
+// --- Portability: other repos, other languages, build-tool commands ---------------------
+// These are what make the tool usable outside the bundled demo repo.
+
+// `sourceFile` must win over arguments[1], so build commands work.
+buildConfig = {
+    executable       : "sh",
+    arguments        : [ "-c", "javac -d out src/*.java && java -cp out Main" ],
+    sourceFile       : "src/Greeter.java",
+    allowedExtensions: [ "java" ],
+    baseBranch       : "main"
+};
+fakeRun = {
+    combinedOutput: 'Exception in thread "main" java.lang.NullPointerException' & char( 10 ) & '	at Greeter.greet(Greeter.java:3)',
+    succeeded     : false,
+    exitCode      : 1
+};
+buildRepo = makeRepo( BROKEN, CONFIG_JSON );
+directoryCreate( buildRepo & "/src", true );
+fileWrite( buildRepo & "/src/Greeter.java", "public class Greeter { }" );
+buildContext = new src.FailureContext().build( fakeRun, buildRepo, buildConfig );
+
+check( "sourceFile overrides arguments[1] for build commands",
+    buildContext.contextFound && buildContext.candidateFiles[ 1 ] == "src/Greeter.java",
+    buildContext.reason ?: buildContext.candidateFiles.toList( "," ) );
+
+// Non-Java languages, driven purely by allowedExtensions.
+pyConfig = { executable: "python3", arguments: [ "src/app.py" ], allowedExtensions: [ "py" ], baseBranch: "main" };
+pyRun    = { combinedOutput: 'File "src/app.py", line 5, in main' & char( 10 ) & "ZeroDivisionError: division by zero", succeeded: false, exitCode: 1 };
+pyRepo   = makeRepo( BROKEN, CONFIG_JSON );
+directoryCreate( pyRepo & "/src", true );
+fileWrite( pyRepo & "/src/app.py", "print(1/0)" );
+pyContext = new src.FailureContext().build( pyRun, pyRepo, pyConfig );
+
+check( "python source file is accepted", pyContext.contextFound, pyContext.reason ?: "" );
+check( "python line number parsed from traceback", pyContext.lineNumber == "5", "got [" & pyContext.lineNumber & "]" );
+
+// A failure in a file we are not allowed to touch must be refused.
+unrelatedRun = duplicate( fakeRun );
+unrelatedRun.combinedOutput = "at Something.other(Unrelated.java:11)";
+check( "failure in an unconfigured file is refused",
+    !new src.FailureContext().build( unrelatedRun, repo, parsedConfig ).contextFound );
+
 // --- Report ----------------------------------------------------------------------------
 println( "" );
 println( repeatString( "=", 78 ) );
