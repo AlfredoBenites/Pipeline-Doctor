@@ -1,87 +1,158 @@
-/**
- * Pipeline Doctor placeholder pipeline
- *
- * Shared contracts:
- *
- * CommandResult:
- * - command
- * - exitCode
- * - stdout
- * - stderr
- * - succeeded
- *
- * RepairResult:
- * - diagnosis
- * - summary
- * - changedFiles
- * - repaired
- *
- * PublishResult:
- * - branchName
- * - commitSha
- * - prUrl
- * - published
- */
+//cat << 'ENDFILE' > main.bxs
+import src.CommandRunner;
+import src.FailureContext;
+import src.RepairAgent;
+import src.publisher.GitHubPublisher;
 
-function fakeRunProject() {
-	return {
-		command   : "java src/App.java",
-		exitCode  : 1,
-		stdout    : "",
-		stderr    : "java.lang.NullPointerException: demo failure",
-		succeeded : false
-	}
+println( "==================================================" );
+println( "             PIPELINE DOCTOR v1.0.0               " );
+println( "  Automated Failure Reproduction & Pull Request   " );
+println( "==================================================" );
+
+// Target isolated demo repository
+repoPath = getCanonicalPath( expandPath( "../pipeline-doctor-demo" ) );
+baseBranch = "main";
+branchTimestamp = replace( replace( dateTimeFormat( now(), "yyyy-mm-dd-HH-nn-ss" ), " ", "-", "all" ), ":", "-", "all" );
+branchName = "pipeline-doctor/fix-npe-" & branchTimestamp;
+
+config = {
+    "executable": "java",
+    "arguments": [ "test-repo/src/App.java" ],
+    "timeoutSeconds": 60,
+    "allowedExtensions": [ "java" ],
+    "maxFilesChanged": 1,
+    "baseBranch": baseBranch
+};
+
+publisher = new GitHubPublisher();
+
+// --- Stage 1 & 2: Isolation Branch ---
+println( "" );
+println( "[Stage 1 & 2: Setup & Branching]" );
+println( "Target Repository: " & repoPath );
+println( "Creating isolation branch: " & branchName );
+
+branchResult = publisher.createRepairBranch( repoPath, baseBranch, branchName );
+if ( structKeyExists( branchResult, "created" ) && !branchResult.created ) {
+    println( "Branch creation error: " & ( branchResult.error ?: "Unable to create branch" ) );
+    abort;
+}
+println( "Switched to branch: " & branchName );
+
+// Introduce reproduction bug on the isolation branch
+appPath = repoPath & "/test-repo/src/App.java";
+appContent = fileRead( appPath );
+if ( find( '"Developer"', appContent ) ) {
+    fileWrite( appPath, replace( appContent, '"Developer"', 'null' ) );
+}
+if ( fileExists( repoPath & "/test-repo/src/App.class" ) ) {
+    fileDelete( repoPath & "/test-repo/src/App.class" );
 }
 
-function fakeRepairProject( commandResult ) {
-	return {
-		diagnosis   : "The application dereferenced a null value.",
-		summary     : "Added a null check before using the value.",
-		changedFiles: [ "src/App.java" ],
-		repaired    : true
-	}
+// --- Stage 3: Reproduce Failure ---
+println( "" );
+println( "[Stage 3: Reproducing Failure]" );
+runner = new CommandRunner();
+firstRun = runner.run( config, repoPath );
+
+if ( firstRun.success ) {
+    println( "SUCCESS: No failure detected on initial execution (Exit code: 0). Exiting." );
+    abort;
 }
 
-function fakeVerifyProject() {
-	return {
-		command   : "java src/App.java",
-		exitCode  : 0,
-		stdout    : "Application completed successfully.",
-		stderr    : "",
-		succeeded : true
-	}
+println( "Failure confirmed (Exit code: " & firstRun.exitCode & ")." );
+println( "Error output preview: " & left( trim( firstRun.stderr ), 120 ) & "..." );
+
+// --- Stage 4: Build Failure Context ---
+println( "" );
+println( "[Stage 4: Context Building]" );
+contextBuilder = new FailureContext();
+context = contextBuilder.build( firstRun, repoPath, config );
+
+if ( context.candidateFiles.len() && !context.candidateFiles[ 1 ].startsWith( "test-repo/src/" ) ) {
+    context.candidateFiles[ 1 ] = "test-repo/src/" & getFileFromPath( context.candidateFiles[ 1 ] );
+}
+println( "Candidate file identified: " & context.candidateFiles.toList( ", " ) );
+
+// --- Stage 5: AI Repair ---
+println( "" );
+println( "[Stage 5: AI Diagnosis & Repair]" );
+agent = new RepairAgent();
+repair = agent.repair( context );
+
+println( "Diagnosis : " & repair.diagnosis );
+println( "Summary   : " & repair.summary );
+println( "Confidence: " & repair.confidence );
+
+if ( !repair.safeToVerify ) {
+    println( "SAFETY ABORT: Proposed repair violated safety constraints." );
+    abort;
 }
 
-function fakePublishRepair( repairResult, verificationResult ) {
-	if ( !verificationResult.succeeded ) {
-		return {
-			branchName: "",
-			commitSha : "",
-			prUrl     : "",
-			published : false
-		}
-	}
+// --- Stage 6: Verify Fix ---
+println( "" );
+println( "[Stage 6: Verifying Fix]" );
+secondRun = runner.run( config, repoPath );
 
-	return {
-		branchName: "pipeline-doctor/fix-demo",
-		commitSha : "fake-commit-sha",
-		prUrl     : "https://github.com/example/demo/pull/1",
-		published : true
-	}
+if ( !secondRun.success ) {
+    println( "VERIFICATION FAILED: Test command still failing with exit code: " & secondRun.exitCode );
+    abort;
 }
 
-println( "Pipeline Doctor: starting placeholder pipeline" )
+println( "VERIFICATION PASSED: Program exited cleanly (Exit code: 0)!" );
+println( "Output: " & trim( secondRun.stdout ) );
 
-commandResult      = fakeRunProject()
-repairResult       = fakeRepairProject( commandResult )
-verificationResult = fakeVerifyProject()
-publishResult      = fakePublishRepair( repairResult, verificationResult )
+repairContract = {
+    "diagnosis": repair.diagnosis,
+    "summary": repair.summary,
+    "changedFiles": [ "test-repo/src/App.java" ],
+    "repaired": true
+};
 
-pipelineResult = {
-	initialRun  : commandResult,
-	repair      : repairResult,
-	verification: verificationResult,
-	publish     : publishResult
+verificationContract = {
+    "exitCode": secondRun.exitCode,
+    "succeeded": secondRun.success
+};
+
+// --- Stage 7: Commit, Push & Publish PR ---
+println( "" );
+println( "[Stage 7: Publishing Pull Request]" );
+commitResult = publisher.commitVerifiedRepair(
+    repoPath,
+    repairContract,
+    verificationContract,
+    "fix(app): " & repair.summary
+);
+
+if ( structKeyExists( commitResult, "committed" ) && !commitResult.committed ) {
+    println( "Commit error: " & ( commitResult.error ?: "Failed to commit" ) );
+    abort;
+}
+println( "Committed repair to branch: " & branchName );
+
+println( "Pushing branch to origin..." );
+pushResult = publisher.pushRepairBranch( repoPath );
+if ( structKeyExists( pushResult, "pushed" ) && !pushResult.pushed ) {
+    println( "Push warning: " & ( pushResult.error ?: "Failed to push" ) );
 }
 
-println( jsonSerialize( data = pipelineResult, pretty = true ) )
+prTitle = "fix(app): " & repair.summary;
+prBody = "**Pipeline Doctor Automated Fix**" &
+        "\n\n**Diagnosis:**\n" & repair.diagnosis &
+        "\n\n**Verification:**\n" &
+        "- Initial Exit Code: `" & firstRun.exitCode & "` (Failed)\n" &
+        "- Re-run Exit Code: `" & secondRun.exitCode & "` (Passed)\n\n" &
+        "**Summary:**\n" & repair.summary;
+
+println( "Creating GitHub Pull Request via gh CLI..." );
+prResult = publisher.createPullRequest( repoPath, baseBranch, prTitle, prBody );
+
+println( "" );
+println( "==================================================" );
+if ( structKeyExists( prResult, "published" ) && prResult.published ) {
+    println( "PIPELINE DOCTOR RUN COMPLETE!" );
+    println( "Pull Request URL: " & prResult.prUrl );
+} else {
+    println( "Pipeline completed. PR Result: " & jsonSerialize( prResult ) );
+}
+println( "==================================================" );
