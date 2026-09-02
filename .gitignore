@@ -2,3 +2,5 @@
 .DS_Store
 *.log
 .build/
+
+.boxlang_modules
