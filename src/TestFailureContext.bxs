@@ -1,7 +1,13 @@
-repoPath = "C:/Users/elpuc/demo-java-bug";
+repoPath = getCanonicalPath( expandPath( "../test-repo" ) );
 
-configText = fileRead( repoPath & "/pipeline-doctor.json" );
-config = JSONDeserialize( configText );
+config = {
+    "executable": "java",
+    "arguments": [ "src/App.java" ],
+    "timeoutSeconds": 60,
+    "allowedExtensions": [ "java" ],
+    "maxFilesChanged": 1,
+    "baseBranch": "main"
+};
 
 runner = new CommandRunner();
 commandResult = runner.run( config, repoPath );
