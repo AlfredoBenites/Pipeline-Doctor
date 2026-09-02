@@ -1,0 +1,61 @@
+class {
+
+    function build( required commandResult, required repoPath, required config ) {
+
+        failureOutput = commandResult.combinedOutput;
+
+        match = reFind(
+            "([A-Za-z0-9_]+\.java):([0-9]+)",
+            failureOutput,
+            1,
+            true
+        );
+
+        if ( arrayLen( match.match ) < 3 ) {
+            return {
+                repoPath: repoPath,
+                failureOutput: failureOutput,
+                candidateFiles: [],
+                sourceSnippets: {},
+                lineNumber: "",
+                contextFound: false
+            };
+        }
+
+      fileName = match.match[ 2 ];
+lineNumber = match.match[ 3 ];
+
+fileExtension = listLast( fileName, "." );
+
+if ( !config.allowedExtensions.findNoCase( fileExtension ) ) {
+    return {
+        repoPath: repoPath,
+        failureOutput: failureOutput,
+        candidateFiles: [],
+        sourceSnippets: {},
+        lineNumber: lineNumber,
+        contextFound: false,
+        reason: "File extension is not allowed: " & fileExtension
+    };
+}
+
+relativeSourcePath = config.arguments[ 1 ];
+sourcePath = repoPath & "/" & relativeSourcePath;
+
+        sourceCode = fileRead( sourcePath );
+
+        failureContext = {
+            repoPath: repoPath,
+            failureOutput: failureOutput,
+            candidateFiles: [ fileName ],
+            sourceSnippets: {
+                "#fileName#": sourceCode
+            },
+            lineNumber: lineNumber,
+            contextFound: true
+        };
+
+        return failureContext;
+    }
+
+}
