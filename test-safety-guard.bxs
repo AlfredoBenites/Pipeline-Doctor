@@ -1,0 +1,60 @@
+import src.publisher.SafetyGuard;
+
+guard = new SafetyGuard()
+
+repairResult = {
+	diagnosis   : "A null value was dereferenced.",
+	summary     : "Added a null check.",
+	changedFiles: [ "src/App.java" ],
+	repaired    : true
+}
+
+failedVerification = {
+	exitCode : 1,
+	succeeded: false
+}
+
+successfulVerification = {
+	exitCode : 0,
+	succeeded: true
+}
+
+unsafeRepair = {
+	diagnosis   : "Unsafe test",
+	summary     : "Attempted to change a secret.",
+	changedFiles: [ ".env" ],
+	repaired    : true
+}
+
+println( "Test 1: failed verification must be rejected" )
+println(
+	jsonSerialize(
+		data = guard.validateForPublish(
+			repairResult,
+			failedVerification
+		),
+		pretty = true
+	)
+)
+
+println( "Test 2: unsafe file must be rejected" )
+println(
+	jsonSerialize(
+		data = guard.validateForPublish(
+			unsafeRepair,
+			successfulVerification
+		),
+		pretty = true
+	)
+)
+
+println( "Test 3: verified safe repair must be accepted" )
+println(
+	jsonSerialize(
+		data = guard.validateForPublish(
+			repairResult,
+			successfulVerification
+		),
+		pretty = true
+	)
+)

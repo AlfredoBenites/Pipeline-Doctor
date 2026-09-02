@@ -1,0 +1,7 @@
+import src.publisher.GitHubPublisher;
+
+publisher = new GitHubPublisher()
+
+result = publisher.checkPrerequisites( "." )
+
+println( jsonSerialize( data = result, pretty = true ) )

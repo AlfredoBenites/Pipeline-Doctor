@@ -1,0 +1,42 @@
+class {
+
+	function validateForPublish( repairResult, verificationResult ) {
+		var errors = []
+
+		if ( !verificationResult.succeeded ) {
+			errors.append(
+				"Verification failed. A pull request cannot be published."
+			)
+		}
+
+		if ( !repairResult.repaired ) {
+			errors.append(
+				"The repair stage did not produce a repair."
+			)
+		}
+
+		if ( repairResult.changedFiles.len() == 0 ) {
+			errors.append(
+				"The repair did not report any changed files."
+			)
+		}
+
+		for ( path in repairResult.changedFiles ) {
+			if (
+				findNoCase( ".env", path ) > 0 ||
+				find( "..", path ) > 0 ||
+				left( path, 1 ) == "/"
+			) {
+				errors.append(
+					"Unsafe file path rejected: " & path
+				)
+			}
+		}
+
+		return {
+			safe  : errors.len() == 0,
+			errors: errors
+		}
+	}
+
+}

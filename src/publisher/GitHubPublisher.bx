@@ -1,0 +1,34 @@
+class {
+
+	function runCommand( name, commandArguments, workingDirectory ) {
+		return systemExecute(
+			name               = name,
+			arguments          = commandArguments,
+			directory          = workingDirectory,
+			timeout            = 30,
+			terminateOnTimeout = true
+		)
+	}
+
+	function checkPrerequisites( workingDirectory ) {
+		var gitResult = runCommand(
+			"git",
+			[ "--version" ],
+			workingDirectory
+		)
+
+		var githubResult = runCommand(
+			"gh",
+			[ "auth", "status" ],
+			workingDirectory
+		)
+
+		return {
+            gitAvailable       : gitResult.exitCode == 0,
+            githubAuthenticated: githubResult.exitCode == 0,
+            gitVersion         : gitResult.output,
+            error              : githubResult.exitCode == 0 ? "" : githubResult.error
+        }
+	}
+
+}
