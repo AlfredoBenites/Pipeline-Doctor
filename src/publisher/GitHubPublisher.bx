@@ -1,4 +1,121 @@
+import src.publisher.SafetyGuard;
+
 class {
+
+    function commitVerifiedRepair(
+        workingDirectory,
+        repairResult,
+        verificationResult,
+        commitMessage
+    ) {
+        var repository = inspectRepository( workingDirectory )
+
+        if ( !repository.validRepository ) {
+            return {
+                committed   : false,
+                branchName : "",
+                commitSha  : "",
+                changedFiles: [],
+                errors      : [ "The target is not a Git repository." ]
+            }
+        }
+
+        if ( find( "pipeline-doctor/", repository.branchName ) != 1 ) {
+            return {
+                committed   : false,
+                branchName : repository.branchName,
+                commitSha  : "",
+                changedFiles: repository.changedFiles,
+                errors      : [
+                    "Refusing to commit outside a pipeline-doctor branch."
+                ]
+            }
+        }
+
+        var guard = new SafetyGuard()
+
+        var repairSafety = guard.validateForPublish(
+            repairResult,
+            verificationResult
+        )
+
+        if ( !repairSafety.safe ) {
+            return {
+                committed   : false,
+                branchName : repository.branchName,
+                commitSha  : "",
+                changedFiles: repository.changedFiles,
+                errors      : repairSafety.errors
+            }
+        }
+
+        var fileSafety = guard.validateChangedFiles(
+            repairResult.changedFiles,
+            repository.changedFiles
+        )
+
+        if ( !fileSafety.safe ) {
+            return {
+                committed   : false,
+                branchName : repository.branchName,
+                commitSha  : "",
+                changedFiles: repository.changedFiles,
+                errors      : fileSafety.errors
+            }
+        }
+
+        var addArguments = [ "add", "--" ]
+
+        for ( path in repairResult.changedFiles ) {
+            addArguments.append( path )
+        }
+
+        var addResult = runCommand(
+            "git",
+            addArguments,
+            workingDirectory
+        )
+
+        if ( addResult.exitCode != 0 ) {
+            return {
+                committed   : false,
+                branchName : repository.branchName,
+                commitSha  : "",
+                changedFiles: repository.changedFiles,
+                errors      : [ addResult.error ]
+            }
+        }
+
+        var commitResult = runCommand(
+            "git",
+            [ "commit", "-m", commitMessage ],
+            workingDirectory
+        )
+
+        if ( commitResult.exitCode != 0 ) {
+            return {
+                committed   : false,
+                branchName : repository.branchName,
+                commitSha  : "",
+                changedFiles: repository.changedFiles,
+                errors      : [ commitResult.error ]
+            }
+        }
+
+        var shaResult = runCommand(
+            "git",
+            [ "rev-parse", "HEAD" ],
+            workingDirectory
+        )
+
+        return {
+            committed   : true,
+            branchName : repository.branchName,
+            commitSha  : trim( shaResult.output ),
+            changedFiles: repairResult.changedFiles,
+            errors      : []
+        }
+    }
 
 	function runCommand( name, commandArguments, workingDirectory ) {
 		return systemExecute(
