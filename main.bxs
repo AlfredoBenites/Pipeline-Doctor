@@ -1,1 +1,87 @@
-println( 'Pipeline Doctor setup works!' )
+/**
+ * Pipeline Doctor placeholder pipeline
+ *
+ * Shared contracts:
+ *
+ * CommandResult:
+ * - command
+ * - exitCode
+ * - stdout
+ * - stderr
+ * - succeeded
+ *
+ * RepairResult:
+ * - diagnosis
+ * - summary
+ * - changedFiles
+ * - repaired
+ *
+ * PublishResult:
+ * - branchName
+ * - commitSha
+ * - prUrl
+ * - published
+ */
+
+function fakeRunProject() {
+	return {
+		command   : "java src/App.java",
+		exitCode  : 1,
+		stdout    : "",
+		stderr    : "java.lang.NullPointerException: demo failure",
+		succeeded : false
+	}
+}
+
+function fakeRepairProject( commandResult ) {
+	return {
+		diagnosis   : "The application dereferenced a null value.",
+		summary     : "Added a null check before using the value.",
+		changedFiles: [ "src/App.java" ],
+		repaired    : true
+	}
+}
+
+function fakeVerifyProject() {
+	return {
+		command   : "java src/App.java",
+		exitCode  : 0,
+		stdout    : "Application completed successfully.",
+		stderr    : "",
+		succeeded : true
+	}
+}
+
+function fakePublishRepair( repairResult, verificationResult ) {
+	if ( !verificationResult.succeeded ) {
+		return {
+			branchName: "",
+			commitSha : "",
+			prUrl     : "",
+			published : false
+		}
+	}
+
+	return {
+		branchName: "pipeline-doctor/fix-demo",
+		commitSha : "fake-commit-sha",
+		prUrl     : "https://github.com/example/demo/pull/1",
+		published : true
+	}
+}
+
+println( "Pipeline Doctor: starting placeholder pipeline" )
+
+commandResult      = fakeRunProject()
+repairResult       = fakeRepairProject( commandResult )
+verificationResult = fakeVerifyProject()
+publishResult      = fakePublishRepair( repairResult, verificationResult )
+
+pipelineResult = {
+	initialRun  : commandResult,
+	repair      : repairResult,
+	verification: verificationResult,
+	publish     : publishResult
+}
+
+println( jsonSerialize( data = pipelineResult, pretty = true ) )
