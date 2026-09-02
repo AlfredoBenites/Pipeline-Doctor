@@ -2,6 +2,24 @@ import src.publisher.GitHubPublisher;
 
 publisher = new GitHubPublisher()
 
-result = publisher.checkPrerequisites( "." )
+println( "Checking prerequisites:" )
 
-println( jsonSerialize( data = result, pretty = true ) )
+prerequisites = publisher.checkPrerequisites( "." )
+
+println(
+	jsonSerialize(
+		data = prerequisites,
+		pretty = true
+	)
+)
+
+println( "Inspecting repository:" )
+
+repository = publisher.inspectRepository( "." )
+
+println(
+	jsonSerialize(
+		data = repository,
+		pretty = true
+	)
+)

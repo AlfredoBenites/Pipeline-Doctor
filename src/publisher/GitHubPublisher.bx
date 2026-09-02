@@ -31,4 +31,55 @@ class {
         }
 	}
 
+    function inspectRepository( workingDirectory ) {
+        var repositoryResult = runCommand(
+            "git",
+            [ "rev-parse", "--is-inside-work-tree" ],
+            workingDirectory
+        )
+
+        if ( repositoryResult.exitCode != 0 ) {
+            return {
+                validRepository: false,
+                branchName    : "",
+                clean         : false,
+                changedFiles  : [],
+                error         : repositoryResult.error
+            }
+        }
+
+        var branchResult = runCommand(
+            "git",
+            [ "branch", "--show-current" ],
+            workingDirectory
+        )
+
+        var statusResult = runCommand(
+            "git",
+            [ "status", "--porcelain" ],
+            workingDirectory
+        )
+
+        var changedFiles = []
+
+        if ( len( trim( statusResult.output ) ) > 0 ) {
+            for ( line in listToArray( statusResult.output, char( 10 ) ) ) {
+                if ( len( line ) >= 4 ) {
+                    changedFiles.append(
+                        trim( mid( line, 4, len( line ) - 3 ) )
+                    )
+                }
+            }
+        }
+
+        return {
+            validRepository: true,
+            branchName    : trim( branchResult.output ),
+            clean         : changedFiles.len() == 0,
+            changedFiles  : changedFiles,
+            error         : statusResult.exitCode == 0
+                ? ""
+                : statusResult.error
+        }
+    }
 }
