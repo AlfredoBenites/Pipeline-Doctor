@@ -1,0 +1,44 @@
+repoPath = getCanonicalPath( expandPath( "../test-repo" ) );
+
+config = {
+    "executable": "java",
+    "arguments": [ "src/App.java" ],
+    "timeoutSeconds": 60,
+    "allowedExtensions": [ "java" ],
+    "maxFilesChanged": 1,
+    "baseBranch": "main"
+};
+
+runner = new CommandRunner();
+commandResult = runner.run( config, repoPath );
+
+println( "CONFIG:" );
+writeDump( config );
+
+println( "" );
+
+if ( commandResult.success ) {
+
+    println( "COMMAND RESULT:" );
+    writeDump( commandResult );
+
+    println( "" );
+    println( "No failure found. FailureContext was not created." );
+
+} else {
+
+    contextBuilder = new FailureContext();
+
+    failureContext = contextBuilder.build(
+        commandResult,
+        repoPath,
+        config
+    );
+
+    println( "COMMAND RESULT:" );
+    writeDump( commandResult );
+
+    println( "" );
+    println( "FAILURE CONTEXT:" );
+    writeDump( failureContext );
+}

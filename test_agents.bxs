@@ -1,0 +1,16 @@
+mockContext = {
+    "repoPath": expandPath( "./test-repo" ),
+    "failureOutput": "Exception in thread ""main"" java.lang.NullPointerException: Cannot invoke ""String.toUpperCase()"" because ""developerName"" is null at App.main(App.java:4)",
+    "candidateFiles": [ "src/App.java" ],
+    "sourceSnippets": {}
+};
+
+print( "Running RepairAgent...\n" );
+repairAgent = new src.RepairAgent();
+result = repairAgent.repair( mockContext );
+
+print( "\n=== REPAIR RESULT CONTRACT ===\n" );
+print( result.toJson() & "\n" );
+
+print( "\n=== MODIFIED JAVA FILE (test-repo/src/App.java) ===\n" );
+print( fileRead( expandPath( "./test-repo/src/App.java" ) ) & "\n" );

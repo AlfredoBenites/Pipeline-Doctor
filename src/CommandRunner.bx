@@ -1,0 +1,55 @@
+class {
+
+    function run( required config, required repoPath ) {
+
+        startTime = getTickCount();
+
+        try {
+
+            result = systemExecute(
+                name: config.executable,
+                arguments: config.arguments,
+                timeout: config.timeoutSeconds,
+                terminateOnTimeout: true,
+                directory: repoPath
+            );
+
+            endTime = getTickCount();
+
+            commandResult = {
+                success: result.exitCode == 0,
+                command: config.executable & " " & config.arguments.toList( " " ),
+                exitCode: result.exitCode,
+                stdout: result.output,
+                stderr: result.error,
+                combinedOutput: result.output & result.error,
+                durationMs: endTime - startTime,
+                timedOut: result.timeout,
+                terminated: result.terminated,
+                started: true
+            };
+
+            return commandResult;
+
+        } catch ( any error ) {
+
+            endTime = getTickCount();
+
+            commandResult = {
+                success: false,
+                command: config.executable & " " & config.arguments.toList( " " ),
+                exitCode: -1,
+                stdout: "",
+                stderr: error.message,
+                combinedOutput: error.message,
+                durationMs: endTime - startTime,
+                timedOut: false,
+                terminated: false,
+                started: false
+            };
+
+            return commandResult;
+        }
+    }
+
+}
