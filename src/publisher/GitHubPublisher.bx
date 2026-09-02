@@ -2,6 +2,53 @@ import src.publisher.SafetyGuard;
 
 class {
 
+    function pushRepairBranch( workingDirectory ) {
+        var repository = inspectRepository( workingDirectory )
+
+        if ( !repository.validRepository ) {
+            return {
+                pushed    : false,
+                branchName: "",
+                error     : "The target is not a Git repository."
+            }
+        }
+
+        if ( find( "pipeline-doctor/", repository.branchName ) != 1 ) {
+            return {
+                pushed    : false,
+                branchName: repository.branchName,
+                error     : "Refusing to push a non-Pipeline Doctor branch."
+            }
+        }
+
+        if ( !repository.clean ) {
+            return {
+                pushed    : false,
+                branchName: repository.branchName,
+                error     : "The repository has uncommitted changes."
+            }
+        }
+
+        var pushResult = runCommand(
+            "git",
+            [
+                "push",
+                "--set-upstream",
+                "origin",
+                repository.branchName
+            ],
+            workingDirectory
+        )
+
+        return {
+            pushed    : pushResult.exitCode == 0,
+            branchName: repository.branchName,
+            error     : pushResult.exitCode == 0
+                ? ""
+                : pushResult.error
+        }
+    }
+
     function commitVerifiedRepair(
         workingDirectory,
         repairResult,
