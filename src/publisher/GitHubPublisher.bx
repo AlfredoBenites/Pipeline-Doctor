@@ -1,0 +1,386 @@
+import src.publisher.SafetyGuard;
+
+class {
+
+    function createPullRequest(
+        workingDirectory,
+        baseBranch,
+        pullRequestTitle,
+        pullRequestBody
+    ) {
+        var repository = inspectRepository( workingDirectory )
+
+        if ( !repository.validRepository ) {
+            return {
+                published : false,
+                branchName: "",
+                commitSha : "",
+                prUrl      : "",
+                error      : "The target is not a Git repository."
+            }
+        }
+
+        if ( find( "pipeline-doctor/", repository.branchName ) != 1 ) {
+            return {
+                published : false,
+                branchName: repository.branchName,
+                commitSha : "",
+                prUrl      : "",
+                error      : "Refusing to create a PR from a non-Pipeline Doctor branch."
+            }
+        }
+
+        if ( !repository.clean ) {
+            return {
+                published : false,
+                branchName: repository.branchName,
+                commitSha : "",
+                prUrl      : "",
+                error      : "The repository has uncommitted changes."
+            }
+        }
+
+        var prerequisites = checkPrerequisites( workingDirectory )
+
+        if ( !prerequisites.githubAuthenticated ) {
+            return {
+                published : false,
+                branchName: repository.branchName,
+                commitSha : "",
+                prUrl      : "",
+                error      : "GitHub CLI is not authenticated."
+            }
+        }
+
+        var shaResult = runCommand(
+            "git",
+            [ "rev-parse", "HEAD" ],
+            workingDirectory
+        )
+
+        var pullRequestResult = runCommand(
+            "gh",
+            [
+                "pr",
+                "create",
+                "--base",
+                baseBranch,
+                "--head",
+                repository.branchName,
+                "--title",
+                pullRequestTitle,
+                "--body",
+                pullRequestBody
+            ],
+            workingDirectory
+        )
+
+        return {
+            published : pullRequestResult.exitCode == 0,
+            branchName: repository.branchName,
+            commitSha : trim( shaResult.output ),
+            prUrl      : pullRequestResult.exitCode == 0
+                ? trim( pullRequestResult.output )
+                : "",
+            error      : pullRequestResult.exitCode == 0
+                ? ""
+                : pullRequestResult.error
+        }
+    }
+
+    function pushRepairBranch( workingDirectory ) {
+        var repository = inspectRepository( workingDirectory )
+
+        if ( !repository.validRepository ) {
+            return {
+                pushed    : false,
+                branchName: "",
+                error     : "The target is not a Git repository."
+            }
+        }
+
+        if ( find( "pipeline-doctor/", repository.branchName ) != 1 ) {
+            return {
+                pushed    : false,
+                branchName: repository.branchName,
+                error     : "Refusing to push a non-Pipeline Doctor branch."
+            }
+        }
+
+        if ( !repository.clean ) {
+            return {
+                pushed    : false,
+                branchName: repository.branchName,
+                error     : "The repository has uncommitted changes."
+            }
+        }
+
+        var pushResult = runCommand(
+            "git",
+            [
+                "push",
+                "--set-upstream",
+                "origin",
+                repository.branchName
+            ],
+            workingDirectory
+        )
+
+        return {
+            pushed    : pushResult.exitCode == 0,
+            branchName: repository.branchName,
+            error     : pushResult.exitCode == 0
+                ? ""
+                : pushResult.error
+        }
+    }
+
+    function commitVerifiedRepair(
+        workingDirectory,
+        repairResult,
+        verificationResult,
+        commitMessage
+    ) {
+        var repository = inspectRepository( workingDirectory )
+
+        if ( !repository.validRepository ) {
+            return {
+                committed   : false,
+                branchName : "",
+                commitSha  : "",
+                changedFiles: [],
+                errors      : [ "The target is not a Git repository." ]
+            }
+        }
+
+        if ( find( "pipeline-doctor/", repository.branchName ) != 1 ) {
+            return {
+                committed   : false,
+                branchName : repository.branchName,
+                commitSha  : "",
+                changedFiles: repository.changedFiles,
+                errors      : [
+                    "Refusing to commit outside a pipeline-doctor branch."
+                ]
+            }
+        }
+
+        var guard = new SafetyGuard()
+
+        var repairSafety = guard.validateForPublish(
+            repairResult,
+            verificationResult
+        )
+
+        if ( !repairSafety.safe ) {
+            return {
+                committed   : false,
+                branchName : repository.branchName,
+                commitSha  : "",
+                changedFiles: repository.changedFiles,
+                errors      : repairSafety.errors
+            }
+        }
+
+        var fileSafety = guard.validateChangedFiles(
+            repairResult.changedFiles,
+            repository.changedFiles
+        )
+
+        if ( !fileSafety.safe ) {
+            return {
+                committed   : false,
+                branchName : repository.branchName,
+                commitSha  : "",
+                changedFiles: repository.changedFiles,
+                errors      : fileSafety.errors
+            }
+        }
+
+        var addArguments = [ "add", "--" ]
+
+        for ( path in repairResult.changedFiles ) {
+            addArguments.append( path )
+        }
+
+        var addResult = runCommand(
+            "git",
+            addArguments,
+            workingDirectory
+        )
+
+        if ( addResult.exitCode != 0 ) {
+            return {
+                committed   : false,
+                branchName : repository.branchName,
+                commitSha  : "",
+                changedFiles: repository.changedFiles,
+                errors      : [ addResult.error ]
+            }
+        }
+
+        var commitResult = runCommand(
+            "git",
+            [ "commit", "-m", commitMessage ],
+            workingDirectory
+        )
+
+        if ( commitResult.exitCode != 0 ) {
+            return {
+                committed   : false,
+                branchName : repository.branchName,
+                commitSha  : "",
+                changedFiles: repository.changedFiles,
+                errors      : [ commitResult.error ]
+            }
+        }
+
+        var shaResult = runCommand(
+            "git",
+            [ "rev-parse", "HEAD" ],
+            workingDirectory
+        )
+
+        return {
+            committed   : true,
+            branchName : repository.branchName,
+            commitSha  : trim( shaResult.output ),
+            changedFiles: repairResult.changedFiles,
+            errors      : []
+        }
+    }
+
+	function runCommand( name, commandArguments, workingDirectory ) {
+		return systemExecute(
+			name               = name,
+			arguments          = commandArguments,
+			directory          = workingDirectory,
+			timeout            = 30,
+			terminateOnTimeout = true
+		)
+	}
+
+	function checkPrerequisites( workingDirectory ) {
+		var gitResult = runCommand(
+			"git",
+			[ "--version" ],
+			workingDirectory
+		)
+
+		var githubResult = runCommand(
+			"gh",
+			[ "auth", "status" ],
+			workingDirectory
+		)
+
+		return {
+            gitAvailable       : gitResult.exitCode == 0,
+            githubAuthenticated: githubResult.exitCode == 0,
+            gitVersion         : gitResult.output,
+            error              : githubResult.exitCode == 0 ? "" : githubResult.error
+        }
+	}
+
+    function inspectRepository( workingDirectory ) {
+        var repositoryResult = runCommand(
+            "git",
+            [ "rev-parse", "--is-inside-work-tree" ],
+            workingDirectory
+        )
+
+        if ( repositoryResult.exitCode != 0 ) {
+            return {
+                validRepository: false,
+                branchName    : "",
+                clean         : false,
+                changedFiles  : [],
+                error         : repositoryResult.error
+            }
+        }
+
+        var branchResult = runCommand(
+            "git",
+            [ "branch", "--show-current" ],
+            workingDirectory
+        )
+
+        var statusResult = runCommand(
+            "git",
+            [ "status", "--porcelain" ],
+            workingDirectory
+        )
+
+        var changedFiles = []
+
+        if ( len( trim( statusResult.output ) ) > 0 ) {
+            for ( line in listToArray( statusResult.output, char( 10 ) ) ) {
+                if ( len( line ) >= 4 ) {
+                    changedFiles.append(
+                        trim( mid( line, 4, len( line ) - 3 ) )
+                    )
+                }
+            }
+        }
+
+        return {
+            validRepository: true,
+            branchName    : trim( branchResult.output ),
+            clean         : changedFiles.len() == 0,
+            changedFiles  : changedFiles,
+            error         : statusResult.exitCode == 0
+                ? ""
+                : statusResult.error
+        }
+    }
+
+    function createRepairBranch(
+        workingDirectory,
+        baseBranch,
+        branchName
+    ) {
+        var repository = inspectRepository( workingDirectory )
+
+        if ( !repository.validRepository ) {
+            return {
+                created   : false,
+                baseBranch: baseBranch,
+                branchName: branchName,
+                error     : "The target folder is not a Git repository."
+            }
+        }
+
+        if ( !repository.clean ) {
+            return {
+                created   : false,
+                baseBranch: baseBranch,
+                branchName: branchName,
+                error     : "The target repository already has uncommitted changes."
+            }
+        }
+
+        if ( repository.branchName != baseBranch ) {
+            return {
+                created   : false,
+                baseBranch: baseBranch,
+                branchName: branchName,
+                error     : "Expected branch " & baseBranch &
+                    ", but found " & repository.branchName & "."
+            }
+        }
+
+        var branchResult = runCommand(
+            "git",
+            [ "switch", "-c", branchName ],
+            workingDirectory
+        )
+
+        return {
+            created   : branchResult.exitCode == 0,
+            baseBranch: baseBranch,
+            branchName: branchName,
+            error     : branchResult.exitCode == 0
+                ? ""
+                : branchResult.error
+        }
+    }
+}

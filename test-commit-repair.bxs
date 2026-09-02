@@ -1,0 +1,29 @@
+import src.publisher.GitHubPublisher;
+
+publisher = new GitHubPublisher()
+
+repairResult = {
+	diagnosis   : "The program called toUpperCase() on null.",
+	summary     : "Replaced the null value with a valid string.",
+	changedFiles: [ "scr1/App.java" ],
+	repaired    : true
+}
+
+verificationResult = {
+	exitCode : 0,
+	succeeded: true
+}
+
+result = publisher.commitVerifiedRepair(
+	"../pipeline-doctor-demo",
+	repairResult,
+	verificationResult,
+	"fix: prevent null pointer exception"
+)
+
+println(
+	jsonSerialize(
+		data = result,
+		pretty = true
+	)
+)

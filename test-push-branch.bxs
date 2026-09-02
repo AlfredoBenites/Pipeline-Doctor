@@ -1,0 +1,14 @@
+import src.publisher.GitHubPublisher;
+
+publisher = new GitHubPublisher()
+
+result = publisher.pushRepairBranch(
+    "../pipeline-doctor-demo"
+)
+
+println(
+    jsonSerialize(
+        data = result,
+        pretty = true
+    )
+)
