@@ -1,158 +1,34 @@
-//cat << 'ENDFILE' > main.bxs
-import src.CommandRunner;
-import src.FailureContext;
-import src.RepairAgent;
-import src.publisher.GitHubPublisher;
+/**
+ * Pipeline Doctor - entry point.
+ *
+ *   boxlang main.bxs ../pipeline-doctor-demo
+ *   boxlang main.bxs ../pipeline-doctor-demo --dry-run
+ *
+ * The target may also come from the PIPELINE_DOCTOR_TARGET environment variable.
+ * With neither, it defaults to ../pipeline-doctor-demo.
+ *
+ * --dry-run runs everything through verification, then restores the target instead of
+ * committing, pushing, or opening a pull request. Use it to rehearse safely.
+ *
+ * Exit code 0 when the run published a pull request or completed a dry run; 1 otherwise.
+ *
+ * Pipeline Doctor NEVER merges a pull request.
+ */
 
-println( "==================================================" );
-println( "             PIPELINE DOCTOR v1.0.0               " );
-println( "  Automated Failure Reproduction & Pull Request   " );
-println( "==================================================" );
+import src.Pipeline;
 
-// Target isolated demo repository
-repoPath = getCanonicalPath( expandPath( "../pipeline-doctor-demo" ) );
-baseBranch = "main";
-branchTimestamp = replace( replace( dateTimeFormat( now(), "yyyy-mm-dd-HH-nn-ss" ), " ", "-", "all" ), ":", "-", "all" );
-branchName = "pipeline-doctor/fix-npe-" & branchTimestamp;
+cli       = cliGetArgs();
+dryRun    = cli.options[ "dry-run" ] ?: false;
+targetArg = cli.positionals.len() >= 2
+    ? cli.positionals[ 2 ]
+    : getSystemSetting( "PIPELINE_DOCTOR_TARGET", "../pipeline-doctor-demo" );
 
-config = {
-    "executable": "java",
-    "arguments": [ "test-repo/src/App.java" ],
-    "timeoutSeconds": 60,
-    "allowedExtensions": [ "java" ],
-    "maxFilesChanged": 1,
-    "baseBranch": baseBranch
-};
-
-publisher = new GitHubPublisher();
-
-// --- Stage 1 & 2: Isolation Branch ---
-println( "" );
-println( "[Stage 1 & 2: Setup & Branching]" );
-println( "Target Repository: " & repoPath );
-println( "Creating isolation branch: " & branchName );
-
-branchResult = publisher.createRepairBranch( repoPath, baseBranch, branchName );
-if ( structKeyExists( branchResult, "created" ) && !branchResult.created ) {
-    println( "Branch creation error: " & ( branchResult.error ?: "Unable to create branch" ) );
-    abort;
-}
-println( "Switched to branch: " & branchName );
-
-// Introduce reproduction bug on the isolation branch
-appPath = repoPath & "/test-repo/src/App.java";
-appContent = fileRead( appPath );
-if ( find( '"Developer"', appContent ) ) {
-    fileWrite( appPath, replace( appContent, '"Developer"', 'null' ) );
-}
-if ( fileExists( repoPath & "/test-repo/src/App.class" ) ) {
-    fileDelete( repoPath & "/test-repo/src/App.class" );
-}
-
-// --- Stage 3: Reproduce Failure ---
-println( "" );
-println( "[Stage 3: Reproducing Failure]" );
-runner = new CommandRunner();
-firstRun = runner.run( config, repoPath );
-
-if ( firstRun.success ) {
-    println( "SUCCESS: No failure detected on initial execution (Exit code: 0). Exiting." );
-    abort;
-}
-
-println( "Failure confirmed (Exit code: " & firstRun.exitCode & ")." );
-println( "Error output preview: " & left( trim( firstRun.stderr ), 120 ) & "..." );
-
-// --- Stage 4: Build Failure Context ---
-println( "" );
-println( "[Stage 4: Context Building]" );
-contextBuilder = new FailureContext();
-context = contextBuilder.build( firstRun, repoPath, config );
-
-if ( context.candidateFiles.len() && !context.candidateFiles[ 1 ].startsWith( "test-repo/src/" ) ) {
-    context.candidateFiles[ 1 ] = "test-repo/src/" & getFileFromPath( context.candidateFiles[ 1 ] );
-}
-println( "Candidate file identified: " & context.candidateFiles.toList( ", " ) );
-
-// --- Stage 5: AI Repair ---
-println( "" );
-println( "[Stage 5: AI Diagnosis & Repair]" );
-agent = new RepairAgent();
-repair = agent.repair( context );
-
-println( "Diagnosis : " & repair.diagnosis );
-println( "Summary   : " & repair.summary );
-println( "Confidence: " & repair.confidence );
-
-if ( !repair.safeToVerify ) {
-    println( "SAFETY ABORT: Proposed repair violated safety constraints." );
-    abort;
-}
-
-// --- Stage 6: Verify Fix ---
-println( "" );
-println( "[Stage 6: Verifying Fix]" );
-secondRun = runner.run( config, repoPath );
-
-if ( !secondRun.success ) {
-    println( "VERIFICATION FAILED: Test command still failing with exit code: " & secondRun.exitCode );
-    abort;
-}
-
-println( "VERIFICATION PASSED: Program exited cleanly (Exit code: 0)!" );
-println( "Output: " & trim( secondRun.stdout ) );
-
-repairContract = {
-    "diagnosis": repair.diagnosis,
-    "summary": repair.summary,
-    "changedFiles": [ "test-repo/src/App.java" ],
-    "repaired": true
-};
-
-verificationContract = {
-    "exitCode": secondRun.exitCode,
-    "succeeded": secondRun.success
-};
-
-// --- Stage 7: Commit, Push & Publish PR ---
-println( "" );
-println( "[Stage 7: Publishing Pull Request]" );
-commitResult = publisher.commitVerifiedRepair(
-    repoPath,
-    repairContract,
-    verificationContract,
-    "fix(app): " & repair.summary
-);
-
-if ( structKeyExists( commitResult, "committed" ) && !commitResult.committed ) {
-    println( "Commit error: " & ( commitResult.error ?: "Failed to commit" ) );
-    abort;
-}
-println( "Committed repair to branch: " & branchName );
-
-println( "Pushing branch to origin..." );
-pushResult = publisher.pushRepairBranch( repoPath );
-if ( structKeyExists( pushResult, "pushed" ) && !pushResult.pushed ) {
-    println( "Push warning: " & ( pushResult.error ?: "Failed to push" ) );
-}
-
-prTitle = "fix(app): " & repair.summary;
-prBody = "**Pipeline Doctor Automated Fix**" &
-        "\n\n**Diagnosis:**\n" & repair.diagnosis &
-        "\n\n**Verification:**\n" &
-        "- Initial Exit Code: `" & firstRun.exitCode & "` (Failed)\n" &
-        "- Re-run Exit Code: `" & secondRun.exitCode & "` (Passed)\n\n" &
-        "**Summary:**\n" & repair.summary;
-
-println( "Creating GitHub Pull Request via gh CLI..." );
-prResult = publisher.createPullRequest( repoPath, baseBranch, prTitle, prBody );
+result = new Pipeline().run( getCanonicalPath( expandPath( targetArg ) ), dryRun );
 
 println( "" );
-println( "==================================================" );
-if ( structKeyExists( prResult, "published" ) && prResult.published ) {
-    println( "PIPELINE DOCTOR RUN COMPLETE!" );
-    println( "Pull Request URL: " & prResult.prUrl );
-} else {
-    println( "Pipeline completed. PR Result: " & jsonSerialize( prResult ) );
-}
-println( "==================================================" );
+println( repeatString( "=", 78 ) );
+println( "  RESULT" );
+println( repeatString( "=", 78 ) );
+println( jsonSerialize( data: result, pretty: true ) );
+
+cliExit( ( result.status == "published" || result.status == "dry-run-verified" ) ? 0 : 1 );

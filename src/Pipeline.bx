@@ -1,0 +1,431 @@
+import src.CommandRunner;
+import src.FailureContext;
+import src.RepairAgent;
+import src.publisher.GitHubPublisher;
+import src.publisher.SafetyGuard;
+
+/**
+ * The Pipeline Doctor end-to-end repair pipeline.
+ *
+ * Reproduces a configured failure in a target repository, repairs it on a fresh
+ * pipeline-doctor/ branch, verifies the repair, and opens a pull request.
+ *
+ * It NEVER merges a pull request.
+ *
+ * Lives in a class rather than directly in main.bxs on purpose: as a single script
+ * body this exceeded what the BoxLang 1.17 template compiler emits correctly and
+ * produced a JVM VerifyError. Keeping it in a method also makes it testable.
+ */
+class {
+
+    variables.divider = repeatString( "=", 78 );
+
+    /**
+     * @targetPath Absolute path to the repository to repair
+     * @dryRun     Stop after verification; do not commit, push, or open a PR
+     *
+     * @return struct with diagnosis, changedFiles, verification, commitSha, prUrl, status
+     */
+    function run( required string targetPath, boolean dryRun = false ) {
+
+        variables.publisher     = new GitHubPublisher();
+        variables.branchCreated = false;
+        variables.didCommit     = false;
+        variables.branchName    = "";
+        variables.baseBranch    = "";
+        variables.targetPath    = arguments.targetPath;
+
+        var result = {
+            "target"      : arguments.targetPath,
+            "branch"      : "",
+            "diagnosis"   : "",
+            "summary"     : "",
+            "repairMode"  : "",
+            "changedFiles": [],
+            "verification": {},
+            "commitSha"   : "",
+            "prUrl"       : "",
+            "merged"      : false,
+            "dryRun"      : arguments.dryRun,
+            "status"      : "incomplete"
+        };
+
+        println( variables.divider );
+        println( "  PIPELINE DOCTOR" );
+        println( "  Automated failure diagnosis, repair, and pull request" );
+        println( variables.divider );
+        println( "Target    : " & arguments.targetPath );
+        println( "Mode      : " & ( arguments.dryRun ? "DRY RUN (no commit, push, or PR)" : "FULL (will open a pull request)" ) );
+
+        try {
+            result = runStages( result, arguments.dryRun );
+        } catch ( any e ) {
+            result = handleStop( result, e );
+        }
+
+        return result;
+    }
+
+    /**
+     * The happy path. Every guard raises PipelineStop so cleanup always runs.
+     */
+    private function runStages( required struct result, required boolean dryRun ) {
+
+        var result = arguments.result;
+
+        // --- Stage 1: configuration ---------------------------------------------------
+        banner( "Stage 1: Reading configuration" );
+        var config = readConfig();
+        variables.baseBranch = config.baseBranch;
+
+        println( "Command   : " & config.executable & " " & config.arguments.toList( " " ) );
+        println( "Base      : " & config.baseBranch );
+
+        // --- Stage 2: preconditions ---------------------------------------------------
+        banner( "Stage 2: Checking the target repository" );
+        checkPreconditions( config.baseBranch );
+
+        // --- Stage 3: reproduce -------------------------------------------------------
+        banner( "Stage 3: Reproducing the failure" );
+        var runner   = new CommandRunner();
+        var firstRun = runner.run( config, variables.targetPath );
+
+        if ( firstRun.succeeded ) {
+            halt( "reproduce", "The configured command already succeeds (exit code 0). There is nothing to repair." );
+        }
+
+        println( "Exit code : " & firstRun.exitCode & " (failure reproduced)" );
+        println( "Error     : " & listFirst( trim( firstRun.combinedOutput ), char( 10 ) ) );
+
+        // --- Stage 4: failure context -------------------------------------------------
+        banner( "Stage 4: Building failure context" );
+        var context = new FailureContext().build( firstRun, variables.targetPath, config );
+
+        if ( !context.contextFound ) {
+            halt( "context", "Could not identify a permitted source file: " & ( context.reason ?: "unknown reason" ) );
+        }
+
+        var sourceKey = context.candidateFiles[ 1 ];
+        println( "Source    : " & sourceKey & " (line " & context.lineNumber & ")" );
+        println( "Read      : " & len( context.sourceSnippets[ sourceKey ] ) & " characters of source" );
+
+        // --- Stage 5: branch BEFORE any code changes ----------------------------------
+        banner( "Stage 5: Creating the repair branch" );
+        createBranch( config.baseBranch );
+        result.branch = variables.branchName;
+        println( "Branch    : " & variables.branchName );
+
+        // --- Stage 6: repair ----------------------------------------------------------
+        banner( "Stage 6: Diagnosing and repairing" );
+        println( "Calling the repair agent (this usually takes ~15s)..." );
+
+        context.apiTimeoutSeconds = config.timeoutSeconds;
+        var repair = new RepairAgent().repair( context );
+
+        result.diagnosis    = repair.diagnosis;
+        result.summary      = repair.summary;
+        result.repairMode   = repair.repairMode;
+        result.changedFiles = repair.changedFiles;
+
+        reportRepairMode( repair );
+
+        if ( !repair.repaired || !repair.changedFiles.len() ) {
+            halt( "repair", "The repair agent did not change any file.", repair.apiError ?: "" );
+        }
+
+        // --- Stage 7: verify ----------------------------------------------------------
+        banner( "Stage 7: Verifying the repair" );
+        var secondRun = runner.run( config, variables.targetPath );
+
+        result.verification = {
+            "exitCode" : secondRun.exitCode,
+            "succeeded": secondRun.succeeded
+        };
+
+        if ( !secondRun.succeeded ) {
+            halt(
+                "verify",
+                "Verification failed - the command still exits with " & secondRun.exitCode & ". Refusing to publish.",
+                trim( secondRun.combinedOutput )
+            );
+        }
+
+        println( "Exit code : " & secondRun.exitCode & " (verified)" );
+        println( "Output    : " & trim( secondRun.stdout ) );
+
+        // --- Stage 8: safety ----------------------------------------------------------
+        banner( "Stage 8: Safety checks" );
+        runSafetyChecks( repair, result.verification );
+
+        if ( arguments.dryRun ) {
+            result.status = "dry-run-verified";
+            println( "" );
+            println( "DRY RUN: stopping before commit. The target repository will be restored." );
+            halt( "dry-run", "Dry run complete - repair verified but deliberately not published." );
+        }
+
+        // --- Stage 9: commit ----------------------------------------------------------
+        banner( "Stage 9: Committing the verified repair" );
+        var commitMessage = "fix: " & repair.summary;
+        var commitResult  = variables.publisher.commitVerifiedRepair(
+            variables.targetPath, repair, result.verification, commitMessage
+        );
+
+        if ( !commitResult.committed ) {
+            halt( "commit", "Commit failed: " & commitResult.errors.toList( "; " ) );
+        }
+
+        variables.didCommit = true;
+        result.commitSha    = commitResult.commitSha;
+        println( "Commit    : " & commitResult.commitSha );
+
+        // --- Stage 10: push -----------------------------------------------------------
+        banner( "Stage 10: Pushing the repair branch" );
+        var pushResult = variables.publisher.pushRepairBranch( variables.targetPath );
+
+        if ( !pushResult.pushed ) {
+            halt( "push", "Push failed: " & ( pushResult.error ?: "unknown error" ) );
+        }
+        println( "Pushed    : " & variables.branchName );
+
+        // --- Stage 11: pull request (opened, never merged) ----------------------------
+        banner( "Stage 11: Opening the pull request" );
+        var prResult = variables.publisher.createPullRequest(
+            variables.targetPath,
+            config.baseBranch,
+            commitMessage,
+            buildPullRequestBody( repair, config, firstRun, secondRun )
+        );
+
+        if ( !prResult.published ) {
+            halt( "pull-request", "Pull request creation failed: " & ( prResult.error ?: "unknown error" ) );
+        }
+
+        result.prUrl  = prResult.prUrl;
+        result.status = "published";
+        println( "PR        : " & prResult.prUrl );
+
+        return result;
+    }
+
+    /**
+     * ---------------------------------------------------------------------------------
+     * Stage helpers
+     * ---------------------------------------------------------------------------------
+     */
+
+    private function readConfig() {
+        var configPath = variables.targetPath & "/pipeline-doctor.json";
+
+        if ( !fileExists( configPath ) ) {
+            halt( "config", "No pipeline-doctor.json found at " & configPath );
+        }
+
+        var config = {};
+        try {
+            config = jsonDeserialize( fileRead( configPath ) );
+        } catch ( any parseError ) {
+            halt( "config", "pipeline-doctor.json is not valid JSON: " & parseError.message );
+        }
+
+        for ( var requiredKey in [ "executable", "arguments", "allowedExtensions", "baseBranch" ] ) {
+            if ( !structKeyExists( config, requiredKey ) ) {
+                halt( "config", "pipeline-doctor.json is missing the '" & requiredKey & "' setting." );
+            }
+        }
+
+        if ( !isArray( config.arguments ) || !config.arguments.len() ) {
+            halt( "config", "pipeline-doctor.json 'arguments' must be a non-empty array." );
+        }
+
+        config.timeoutSeconds = config.timeoutSeconds ?: 60;
+        return config;
+    }
+
+    private function checkPreconditions( required string baseBranch ) {
+        var repoState = variables.publisher.inspectRepository( variables.targetPath );
+
+        if ( !repoState.validRepository ) {
+            halt( "preconditions", variables.targetPath & " is not a Git repository." );
+        }
+
+        if ( !repoState.clean ) {
+            halt(
+                "preconditions",
+                "The target repository has uncommitted changes. Commit or discard them first.",
+                repoState.changedFiles.toList( ", " )
+            );
+        }
+
+        if ( repoState.branchName != arguments.baseBranch ) {
+            halt(
+                "preconditions",
+                "Expected the target on branch '" & arguments.baseBranch &
+                "' but it is on '" & repoState.branchName & "'."
+            );
+        }
+
+        println( "Clean     : yes" );
+        println( "Branch    : " & repoState.branchName );
+    }
+
+    private function createBranch( required string baseBranch ) {
+        var stamp = year( now() ) &
+            numberFormat( month( now() ), "00" ) &
+            numberFormat( day( now() ), "00" ) & "-" &
+            numberFormat( hour( now() ), "00" ) &
+            numberFormat( minute( now() ), "00" ) &
+            numberFormat( second( now() ), "00" );
+
+        var suffix = lCase( left( replace( createUUID(), "-", "", "all" ), 6 ) );
+
+        variables.branchName = "pipeline-doctor/fix-" & stamp & "-" & suffix;
+
+        var branchResult = variables.publisher.createRepairBranch(
+            variables.targetPath, arguments.baseBranch, variables.branchName
+        );
+
+        if ( !branchResult.created ) {
+            halt( "branch", "Could not create the repair branch: " & ( branchResult.error ?: "unknown error" ) );
+        }
+
+        variables.branchCreated = true;
+    }
+
+    private function reportRepairMode( required struct repair ) {
+        var label = "nothing";
+        if ( arguments.repair.repairMode == "ai" ) {
+            label = "REAL AI (Gemini)";
+        } else if ( arguments.repair.repairMode == "fallback" ) {
+            label = "HARDCODED FALLBACK - not AI";
+        }
+
+        println( "" );
+        println( "Repair by : " & label );
+
+        if ( arguments.repair.repairMode == "fallback" && len( arguments.repair.apiError ?: "" ) ) {
+            println( "AI unavailable: " & arguments.repair.apiError );
+        }
+
+        println( "Diagnosis : " & arguments.repair.diagnosis );
+        println( "Summary   : " & arguments.repair.summary );
+        println( "Changed   : " & arguments.repair.changedFiles.toList( ", " ) );
+    }
+
+    private function runSafetyChecks( required struct repair, required struct verification ) {
+        var guard      = new SafetyGuard();
+        var afterState = variables.publisher.inspectRepository( variables.targetPath );
+
+        var publishSafety = guard.validateForPublish( arguments.repair, arguments.verification );
+        if ( !publishSafety.safe ) {
+            halt( "safety", "Refusing to publish: " & publishSafety.errors.toList( "; " ) );
+        }
+
+        var fileSafety = guard.validateChangedFiles( arguments.repair.changedFiles, afterState.changedFiles );
+        if ( !fileSafety.safe ) {
+            halt( "safety", "Refusing to publish: " & fileSafety.errors.toList( "; " ) );
+        }
+
+        println( "Reported by agent : " & arguments.repair.changedFiles.toList( ", " ) );
+        println( "Git actually sees : " & afterState.changedFiles.toList( ", " ) );
+        println( "Match             : yes" );
+    }
+
+    private function buildPullRequestBody(
+        required struct repair,
+        required struct config,
+        required struct firstRun,
+        required struct secondRun
+    ) {
+        var nl     = char( 10 );
+        var source = arguments.repair.repairMode == "ai" ? "AI (Gemini)" : "deterministic fallback";
+
+        return "## Pipeline Doctor automated repair" & nl & nl &
+            "**Diagnosis**" & nl & arguments.repair.diagnosis & nl & nl &
+            "**Fix**" & nl & arguments.repair.summary & nl & nl &
+            "**Verification**" & nl &
+            "- Command: `" & arguments.config.executable & " " & arguments.config.arguments.toList( " " ) & "`" & nl &
+            "- Before: exit code " & arguments.firstRun.exitCode & " (failing)" & nl &
+            "- After: exit code " & arguments.secondRun.exitCode & " (passing)" & nl & nl &
+            "**Repair produced by**: " & source & nl & nl &
+            "Files changed: `" & arguments.repair.changedFiles.toList( "`, `" ) & "`" & nl & nl &
+            "_Opened automatically by Pipeline Doctor and awaiting human review. Pipeline Doctor never merges._";
+    }
+
+    /**
+     * ---------------------------------------------------------------------------------
+     * Stop handling and cleanup
+     * ---------------------------------------------------------------------------------
+     */
+
+    private function handleStop( required struct result, required any e ) {
+        var result           = arguments.result;
+        var isControlledStop = ( arguments.e.type ?: "" ) == "PipelineStop";
+        var failedStage      = isControlledStop ? listFirst( arguments.e.detail, "|" ) : "unexpected";
+
+        result.status = ( failedStage == "dry-run" ) ? "dry-run-verified" : "stopped";
+        result.error  = arguments.e.message;
+        result.stage  = failedStage;
+
+        println( "" );
+        println( variables.divider );
+        if ( failedStage == "dry-run" ) {
+            println( "  DRY RUN COMPLETE" );
+        } else {
+            println( "  STOPPED at stage: " & failedStage );
+        }
+        println( variables.divider );
+        println( arguments.e.message );
+
+        if ( isControlledStop ) {
+            var extra = listRest( arguments.e.detail, "|" );
+            if ( len( trim( extra ) ) ) {
+                println( "Details   : " & extra );
+            }
+        } else {
+            println( "Unexpected error type: " & ( arguments.e.type ?: "unknown" ) );
+        }
+
+        restoreTarget();
+        return result;
+    }
+
+    /**
+     * Put the target repository back exactly as we found it.
+     *
+     * Only ever discards changes on, and deletes, the branch THIS run created, and only
+     * when no commit was made. Never touches pre-existing branches and never force-pushes.
+     */
+    private function restoreTarget() {
+        if ( !variables.branchCreated ) {
+            return;
+        }
+
+        if ( variables.didCommit ) {
+            println( "" );
+            println( "NOTE: a commit already exists on " & variables.branchName & "; leaving it for inspection." );
+            return;
+        }
+
+        println( "" );
+        println( "Restoring the target repository..." );
+        variables.publisher.runCommand( "git", [ "checkout", "--", "." ], variables.targetPath );
+        variables.publisher.runCommand( "git", [ "switch", variables.baseBranch ], variables.targetPath );
+        variables.publisher.runCommand( "git", [ "branch", "-D", variables.branchName ], variables.targetPath );
+        println( "Restored to " & variables.baseBranch & "; removed " & variables.branchName & "." );
+    }
+
+    private function halt( required string stage, required string message, string details = "" ) {
+        throw(
+            type   : "PipelineStop",
+            message: arguments.message,
+            detail : arguments.stage & "|" & arguments.details
+        );
+    }
+
+    private function banner( required string label ) {
+        println( "" );
+        println( "-- " & arguments.label );
+    }
+
+}

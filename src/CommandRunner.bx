@@ -17,6 +17,9 @@ class {
             endTime = getTickCount();
 
             commandResult = {
+                // `succeeded` is the shared contract field read by SafetyGuard.
+                // `success` is kept as an alias so older callers keep working.
+                succeeded: result.exitCode == 0,
                 success: result.exitCode == 0,
                 command: config.executable & " " & config.arguments.toList( " " ),
                 exitCode: result.exitCode,
@@ -36,6 +39,7 @@ class {
             endTime = getTickCount();
 
             commandResult = {
+                succeeded: false,
                 success: false,
                 command: config.executable & " " & config.arguments.toList( " " ),
                 exitCode: -1,
