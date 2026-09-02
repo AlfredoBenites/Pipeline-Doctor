@@ -82,4 +82,55 @@ class {
                 : statusResult.error
         }
     }
+
+    function createRepairBranch(
+        workingDirectory,
+        baseBranch,
+        branchName
+    ) {
+        var repository = inspectRepository( workingDirectory )
+
+        if ( !repository.validRepository ) {
+            return {
+                created   : false,
+                baseBranch: baseBranch,
+                branchName: branchName,
+                error     : "The target folder is not a Git repository."
+            }
+        }
+
+        if ( !repository.clean ) {
+            return {
+                created   : false,
+                baseBranch: baseBranch,
+                branchName: branchName,
+                error     : "The target repository already has uncommitted changes."
+            }
+        }
+
+        if ( repository.branchName != baseBranch ) {
+            return {
+                created   : false,
+                baseBranch: baseBranch,
+                branchName: branchName,
+                error     : "Expected branch " & baseBranch &
+                    ", but found " & repository.branchName & "."
+            }
+        }
+
+        var branchResult = runCommand(
+            "git",
+            [ "switch", "-c", branchName ],
+            workingDirectory
+        )
+
+        return {
+            created   : branchResult.exitCode == 0,
+            baseBranch: baseBranch,
+            branchName: branchName,
+            error     : branchResult.exitCode == 0
+                ? ""
+                : branchResult.error
+        }
+    }
 }

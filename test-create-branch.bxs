@@ -1,0 +1,18 @@
+import src.publisher.GitHubPublisher;
+
+publisher = new GitHubPublisher()
+
+demoRepository = "../pipeline-doctor-demo"
+
+result = publisher.createRepairBranch(
+	demoRepository,
+	"main",
+	"pipeline-doctor/fix-null-pointer"
+)
+
+println(
+	jsonSerialize(
+		data = result,
+		pretty = true
+	)
+)
