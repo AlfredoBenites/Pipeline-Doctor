@@ -25,7 +25,10 @@ class {
                 "groq",
                 groqKey,
                 getSystemSetting( "AI_BASE_URL", "https://api.groq.com/openai/v1/chat/completions" ),
-                len( modelOverride ) ? modelOverride : "llama-3.3-70b-versatile"
+                // Verified available on Groq's free tier and returns a clean single-line
+                // fix in about a second. Override with AI_MODEL if this is ever retired;
+                // `curl https://api.groq.com/openai/v1/models` lists what your key can use.
+                len( modelOverride ) ? modelOverride : "openai/gpt-oss-120b"
             );
         }
 

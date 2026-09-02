@@ -117,7 +117,7 @@ class {
 
         // --- Stage 6: repair ----------------------------------------------------------
         banner( "Stage 6: Diagnosing and repairing" );
-        println( "Calling the repair agent (this usually takes ~15s)..." );
+        println( "Calling the repair agent..." );
 
         context.apiTimeoutSeconds = config.timeoutSeconds;
         var repair = new RepairAgent().repair( context );
