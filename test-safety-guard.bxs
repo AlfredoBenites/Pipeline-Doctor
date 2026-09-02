@@ -58,3 +58,31 @@ println(
 		pretty = true
 	)
 )
+
+println( "Test 4: matching files must be accepted" )
+
+matchingFiles = guard.validateChangedFiles(
+	[ "src/App.java" ],
+	[ "src/App.java" ]
+)
+
+println(
+	jsonSerialize(
+		data = matchingFiles,
+		pretty = true
+	)
+)
+
+println( "Test 5: unexpected files must be rejected" )
+
+unexpectedFiles = guard.validateChangedFiles(
+	[ "src/App.java" ],
+	[ "src/App.java", ".env" ]
+)
+
+println(
+	jsonSerialize(
+		data = unexpectedFiles,
+		pretty = true
+	)
+)

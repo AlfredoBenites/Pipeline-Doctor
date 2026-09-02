@@ -39,4 +39,33 @@ class {
 		}
 	}
 
+    function validateChangedFiles( reportedFiles, actualFiles ) {
+        var errors = []
+
+        if ( actualFiles.len() == 0 ) {
+            errors.append( "Git shows no changed files." )
+        }
+
+        for ( path in actualFiles ) {
+            if ( reportedFiles.find( path ) == 0 ) {
+                errors.append(
+                    "Git found an unexpected changed file: " & path
+                )
+            }
+        }
+
+        for ( path in reportedFiles ) {
+            if ( actualFiles.find( path ) == 0 ) {
+                errors.append(
+                    "The repair reported a file that Git does not show: " & path
+                )
+            }
+        }
+
+        return {
+            safe  : errors.len() == 0,
+            errors: errors
+        }
+    }
+
 }
