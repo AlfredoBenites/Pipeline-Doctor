@@ -2,6 +2,92 @@ import src.publisher.SafetyGuard;
 
 class {
 
+    function createPullRequest(
+        workingDirectory,
+        baseBranch,
+        pullRequestTitle,
+        pullRequestBody
+    ) {
+        var repository = inspectRepository( workingDirectory )
+
+        if ( !repository.validRepository ) {
+            return {
+                published : false,
+                branchName: "",
+                commitSha : "",
+                prUrl      : "",
+                error      : "The target is not a Git repository."
+            }
+        }
+
+        if ( find( "pipeline-doctor/", repository.branchName ) != 1 ) {
+            return {
+                published : false,
+                branchName: repository.branchName,
+                commitSha : "",
+                prUrl      : "",
+                error      : "Refusing to create a PR from a non-Pipeline Doctor branch."
+            }
+        }
+
+        if ( !repository.clean ) {
+            return {
+                published : false,
+                branchName: repository.branchName,
+                commitSha : "",
+                prUrl      : "",
+                error      : "The repository has uncommitted changes."
+            }
+        }
+
+        var prerequisites = checkPrerequisites( workingDirectory )
+
+        if ( !prerequisites.githubAuthenticated ) {
+            return {
+                published : false,
+                branchName: repository.branchName,
+                commitSha : "",
+                prUrl      : "",
+                error      : "GitHub CLI is not authenticated."
+            }
+        }
+
+        var shaResult = runCommand(
+            "git",
+            [ "rev-parse", "HEAD" ],
+            workingDirectory
+        )
+
+        var pullRequestResult = runCommand(
+            "gh",
+            [
+                "pr",
+                "create",
+                "--base",
+                baseBranch,
+                "--head",
+                repository.branchName,
+                "--title",
+                pullRequestTitle,
+                "--body",
+                pullRequestBody
+            ],
+            workingDirectory
+        )
+
+        return {
+            published : pullRequestResult.exitCode == 0,
+            branchName: repository.branchName,
+            commitSha : trim( shaResult.output ),
+            prUrl      : pullRequestResult.exitCode == 0
+                ? trim( pullRequestResult.output )
+                : "",
+            error      : pullRequestResult.exitCode == 0
+                ? ""
+                : pullRequestResult.error
+        }
+    }
+
     function pushRepairBranch( workingDirectory ) {
         var repository = inspectRepository( workingDirectory )
 

@@ -1,0 +1,17 @@
+import src.publisher.GitHubPublisher;
+
+publisher = new GitHubPublisher()
+
+result = publisher.createPullRequest(
+    "../pipeline-doctor-demo",
+    "main",
+    "fix: prevent null pointer exception",
+    "Pipeline Doctor detected a null pointer exception, repaired the code, and verified that the application now exits successfully."
+)
+
+println(
+    jsonSerialize(
+        data = result,
+        pretty = true
+    )
+)
