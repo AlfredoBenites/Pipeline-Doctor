@@ -1,56 +1,75 @@
-# Pipeline Doctor
-
-Pipeline Doctor is an automated failure reproduction, AI-assisted diagnosis, and patch-verification system built with BoxLang. It reproduces build/runtime failures inside an isolated target repository, synthesizes and applies targeted fixes via an AI agent, verifies execution success, and opens a GitHub Pull Request.
+Pipeline Doctor
+Pipeline Doctor is an automated failure reproduction, AI-assisted diagnosis, and patch-verification system built with BoxLang. It reproduces runtime and test failures inside an isolated target repository, synthesizes and applies targeted fixes via an AI agent, verifies execution success, and automatically opens a GitHub Pull Request.
 
 Architecture Overview
-src.CommandRunner: Executes configured target commands in isolated processes and captures runtime results (exitCode, stdout, stderr, execution timing).
+src.CommandRunner: Runs reproduction and verification commands in isolated processes, returning structured results (exitCode, stdout, stderr, execution timing).
 
-src.FailureContext: Parses stack traces, extracts candidate files, and compiles failure context bounded by configuration rules.
+src.FailureContext: Parses stack traces and compiler logs to extract candidate failure files and build the diagnostic context.
 
-src.RepairAgent: Analyzes the root cause and safely generates code patches without violating structural constraints.
+src.RepairAgent: Analyzes the root cause and generates safe, targeted code patches within bounded project constraints.
 
-src.publisher.GitHubPublisher: Interacts with local Git and the GitHub CLI (gh) to branch, commit, push, and submit Pull Requests.
+src.publisher.GitHubPublisher: Interfaces with Git and the GitHub CLI (gh) to branch, commit, push, and submit Pull Requests.
 
-main.bxs: Orchestrates the 7-stage pipeline loop.
+main.bxs: Orchestrates the 7-stage reproduction-to-PR pipeline.
 
-Prerequisites
-Ensure the following tools are installed and available on your system PATH:
+Prerequisites & Installation
+1. Required Tooling
+Java SDK (17+): Required for BoxLang and Java runtime targets.
 
-BoxLang: Runtime environment for executing .bxs and .bx files.
+Git: System version control.
 
-Java SDK: Version 17+ (required to run Java reproduction targets).
+GitHub CLI (gh): Required for automated push and PR creation.
 
-Git: Version control CLI.
+BoxLang CLI: The runtime used to execute .bx and .bxs files.
 
-GitHub CLI (gh): Required for remote branch publishing and pull request creation.
+macOS (Homebrew)
+Bash
+brew install openjdk@17 git gh
+Ubuntu / Debian
+Bash
+sudo apt update
+sudo apt install -y openjdk-17-jdk git gh
+2. BoxLang Installation
+If BoxLang is not already installed on your machine, install it via the official installer:
 
+Bash
+curl -fsSL https://boxlang.io/install.sh | bash
+Verify your environment:
+
+Bash
+boxlang --version
+java -version
+git --version
+gh --version
 GitHub Authentication Setup
-To allow GitHubPublisher to push branches and open Pull Requests directly from your terminal or VS Code, authenticate the gh CLI:
+Pipeline Doctor uses the gh CLI to publish branches and open pull requests directly from your local environment or VS Code.
+
+Authenticate your GitHub account:
 
 Bash
 gh auth login
-Select the following configuration options during login:
+Choose the following options:
 
-Account: GitHub.com
+What account do you want to log into? GitHub.com
 
-Preferred protocol: HTTPS
+What is your preferred protocol for Git operations on this host? HTTPS
 
 Authenticate Git with your GitHub credentials? Yes
 
-Authentication method: Browser or Personal Access Token
+How would you like to authenticate GitHub CLI? Login with a web browser
 
-Verify active authentication:
+Confirm authentication:
 
 Bash
 gh auth status
-Permission Requirement: The authenticated GitHub account must have collaborator or write permissions on the target repository to push branches and publish PRs.
+Important: Your authenticated GitHub account must have collaborator/write permissions on the target repository to push branches and open Pull Requests.
 
-Local Directory Layout
-To keep the orchestrator tool clean and prevent Git working tree collisions, the target repository must be cloned as a sibling directory:
+Workspace Directory Layout
+To prevent Git state conflicts, the target demo repository must live as an isolated sibling directory directly alongside the tooling repository:
 
 Plaintext
 workspace/
-├── Pipeline-Doctor/          # Core tooling repository (Orchestrator)
+├── Pipeline-Doctor/          # Tooling repo (Orchestrator, Runner, RepairAgent, Publisher)
 │   ├── src/
 │   │   ├── CommandRunner.bx
 │   │   ├── FailureContext.bx
@@ -59,34 +78,44 @@ workspace/
 │   │       └── GitHubPublisher.bx
 │   └── main.bxs
 │
-└── pipeline-doctor-demo/     # Target repository to diagnose & repair
-    ├── pipeline-doctor.json  # Target run configuration
+└── pipeline-doctor-demo/     # Target repo to diagnose and fix
+    ├── pipeline-doctor.json  # Project config & test command
     └── scr1/
-        └── App.java          # Source code containing the bug
-Setup & Execution Instructions
-1. Clone the Repositories Side-by-Side
+        └── App.java          # Target application with bug
+Quickstart Guide
+1. Clone Repositories Side-by-Side
 Bash
-# Clone the core tool repository
+# Clone the main Pipeline Doctor orchestrator
 git clone https://github.com/AlfredoBenites/Pipeline-Doctor.git
 cd Pipeline-Doctor
 
 # Clone the demo target repository in the parent directory
 git clone https://github.com/AlfredoBenites/pipeline-doctor-demo.git ../pipeline-doctor-demo
-2. Verify Target Repository Cleanliness
-The orchestrator requires the target demo repo to start on a clean main branch before branching:
+2. Prepare the Target Demo Repository
+Ensure the target repository starts on a clean main branch with the failing bug present:
 
 Bash
 git -C ../pipeline-doctor-demo checkout main
-git -C ../pipeline-doctor-demo pull origin main
-git -C ../pipeline-doctor-demo status
-Ensure pipeline-doctor-demo contains its reproduction failure (e.g., String developerName = null; in scr1/App.java).
-
+git -C ../pipeline-doctor-demo reset --hard origin/main
+git -C ../pipeline-doctor-demo clean -fd
 3. Run Pipeline Doctor
-From within the Pipeline-Doctor root folder, execute the orchestrator:
+From the root of the Pipeline-Doctor directory, run:
 
 Bash
 boxlang main.bxs
-Expected Terminal Output
+Target Project Configuration (pipeline-doctor.json)
+Pipeline Doctor dynamically loads configuration rules from pipeline-doctor.json located in the root of the target repository:
+
+JSON
+{
+  "executable": "java",
+  "arguments": ["scr1/App.java"],
+  "timeoutSeconds": 60,
+  "allowedExtensions": ["java"],
+  "maxFilesChanged": 1,
+  "baseBranch": "main"
+}
+Expected Output
 Plaintext
 ==================================================
              PIPELINE DOCTOR v1.0.0               
@@ -94,9 +123,9 @@ Plaintext
 ==================================================
 
 [Stage 1 & 2: Setup & Branching]
-Target Repository: /Users/.../pipeline-doctor-demo/
-Creating isolation branch: pipeline-doctor/fix-npe-2026-XX-XX...
-Switched to branch: pipeline-doctor/fix-npe-2026-XX-XX...
+Target Repository: /path/to/pipeline-doctor-demo
+Creating isolation branch: pipeline-doctor/fix-npe-2026-09-02-15-59-23
+Switched to branch: pipeline-doctor/fix-npe-2026-09-02-15-59-23
 
 [Stage 3: Reproducing Failure]
 Failure confirmed (Exit code: 1).
@@ -115,22 +144,19 @@ VERIFICATION PASSED: Program exited cleanly (Exit code: 0)!
 Output: Welcome, DEVELOPER
 
 [Stage 7: Publishing Pull Request]
-Committed repair to branch: pipeline-doctor/fix-npe-2026-XX-XX...
+Committed repair to branch: pipeline-doctor/fix-npe-2026-09-02-15-59-23
 Pushing branch to origin...
 Creating GitHub Pull Request on target repository...
 
 ==================================================
 PIPELINE DOCTOR RUN COMPLETE!
-Pull Request URL: https://github.com/AlfredoBenites/pipeline-doctor-demo/pull/<PR_NUMBER>
+Pull Request URL: https://github.com/AlfredoBenites/pipeline-doctor-demo/pull/2
 ==================================================
 Resetting Between Test Runs
-To run the pipeline again against pipeline-doctor-demo:
+To reset the target demo repo and trigger a clean end-to-end run:
 
 Bash
-# Reset demo repo back to the default failing state on main
 git -C ../pipeline-doctor-demo checkout main
 git -C ../pipeline-doctor-demo reset --hard origin/main
 git -C ../pipeline-doctor-demo clean -fd
-
-# Rerun orchestrator
 boxlang main.bxs
