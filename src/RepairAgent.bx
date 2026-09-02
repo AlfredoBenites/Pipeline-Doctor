@@ -19,6 +19,8 @@ class {
                 "changedFiles": [],
                 "summary": "Aborted due to unsafe file target.",
                 "confidence": "low",
+                "repaired": false,
+                "repairMode": "none",
                 "safeToVerify": false
             };
         }
@@ -42,6 +44,11 @@ class {
 
         // 3. Make Gemini API Call using temporary payload buffer
         var apiKey = getSystemSetting( "GEMINI_API_KEY", "" );
+
+        // A real repair prompt against a thinking model takes ~15s; the previous 10s
+        // budget killed curl mid-flight, which produced empty output and made every
+        // run silently fall back. Give it room, and let the caller override.
+        var apiTimeoutSeconds = arguments.failureContext.apiTimeoutSeconds ?: 60;
         var apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=" & apiKey;
 
         var requestPayload = {
@@ -57,58 +64,136 @@ class {
         var tempPayloadPath = getTempDirectory() & "/gemini_req_" & createUUID() & ".json";
         fileWrite( tempPayloadPath, requestPayload.toJson() );
 
-        var rawText = "";
-        try {
-            var execResult = systemExecute(
-                name = "curl",
-                arguments = [
-                    "-s",
-                    "-m", "10",
-                    "-X", "POST",
-                    apiUrl,
-                    "-H", "Content-Type: application/json",
-                    "--data-binary", "@" & tempPayloadPath
-                ]
-            );
+        var rawText  = "";
+        var apiError = "";
 
-            var out = trim( execResult.output ?: execResult.stdout ?: "" );
-            if ( len( out ) > 0 ) {
-                var responseJson = jsonDeserialize( out );
-                if ( structKeyExists( responseJson, "candidates" ) && responseJson.candidates.len() > 0 ) {
-                    rawText = responseJson.candidates[ 1 ].content.parts[ 1 ].text;
+        // Gemini intermittently answers "high demand" for a few seconds at a time.
+        // A couple of quick retries turns a spurious fallback into a real AI repair.
+        var maxAttempts = arguments.failureContext.apiMaxAttempts ?: 3;
+
+        for ( var attempt = 1; attempt <= maxAttempts; attempt++ ) {
+            try {
+                var execResult = systemExecute(
+                    name = "curl",
+                    arguments = [
+                        "-s",
+                        "-m", toString( apiTimeoutSeconds ),
+                        "-X", "POST",
+                        apiUrl,
+                        "-H", "Content-Type: application/json",
+                        "--data-binary", "@" & tempPayloadPath
+                    ],
+                    timeout            = apiTimeoutSeconds + 10,
+                    terminateOnTimeout = true
+                );
+
+                var out = trim( execResult.output ?: execResult.stdout ?: "" );
+
+                if ( len( out ) == 0 ) {
+                    // Empty output almost always means curl was killed by the timeout.
+                    // Record it so a fallback is never silent.
+                    apiError = "No response from the AI API within " & apiTimeoutSeconds & "s (request timed out).";
+                } else {
+                    var responseJson = jsonDeserialize( out );
+
+                    if ( structKeyExists( responseJson, "candidates" ) && responseJson.candidates.len() > 0 ) {
+                        // Thinking models can return a reasoning part before the answer part,
+                        // so parts[1] is not reliably the text. Take the first part that has any.
+                        var parts = responseJson.candidates[ 1 ].content.parts ?: [];
+                        for ( var part in parts ) {
+                            if ( structKeyExists( part, "text" ) && len( trim( part.text ) ) ) {
+                                rawText = part.text;
+                                break;
+                            }
+                        }
+                    } else if ( structKeyExists( responseJson, "error" ) ) {
+                        // Surface the reason instead of silently sliding into the fallback.
+                        apiError = responseJson.error.message ?: "Unknown API error";
+                    }
                 }
+            } catch( any e ) {
+                rawText  = "";
+                apiError = e.message;
             }
-        } catch( any e ) {
-            rawText = "";
+
+            if ( len( trim( rawText ) ) > 0 ) {
+                apiError = "";
+                break;
+            }
+
+            if ( attempt < maxAttempts ) {
+                sleep( 2000 );
+            }
         }
 
         if ( fileExists( tempPayloadPath ) ) {
             fileDelete( tempPayloadPath );
         }
 
+        if ( len( trim( rawText ) ) == 0 && len( apiError ) == 0 ) {
+            apiError = "The AI response contained no usable text.";
+        }
+
         var repairedCode = "";
         var parsedMeta = {};
 
-        // 4. Parse LLM response if successful
+        // 4. Parse LLM response if successful.
+        //
+        //    Both extractions below target the FENCE explicitly. An earlier version scanned
+        //    for a bare "{...} containing diagnosis", which always started at the opening
+        //    brace of the Java main() method and swallowed the whole code block, so the
+        //    metadata never parsed and the agent silently used its default text.
         if ( len( trim( rawText ) ) > 0 ) {
-            var codeMatches = reMatch( "```(?:java)?\s*([\s\S]*?)```", rawText );
+
+            // -- Java code: prefer an explicit ```java fence, else the first fenced block.
+            var codeMatches = reMatch( "```java\s*[\s\S]*?```", rawText );
+            if ( !codeMatches.len() ) {
+                codeMatches = reMatch( "```[\s\S]*?```", rawText );
+            }
             if ( codeMatches.len() ) {
-                repairedCode = reReplace( codeMatches[ 1 ], "^```(?:java)?\s*", "" );
-                repairedCode = reReplace( repairedCode, "\s*```$", "" );
+                var candidateCode = reReplace( codeMatches[ 1 ], "^```[A-Za-z]*[ \t]*", "" );
+                candidateCode = reReplace( candidateCode, "```$", "" );
+                candidateCode = trim( candidateCode );
+
+                // We are about to overwrite a .java file. Only accept something that
+                // actually looks like Java, so a stray JSON fence can never be written
+                // into the source file.
+                if ( reFindNoCase( "\b(class|interface|enum)\b", candidateCode ) ) {
+                    repairedCode = candidateCode;
+                }
             }
 
-            var jsonMatches = reMatch( '(\{[\s\S]*?"diagnosis"[\s\S]*?\})', rawText );
-            if ( jsonMatches.len() ) {
+            // -- Metadata: prefer an explicit ```json fence.
+            var jsonText   = "";
+            var jsonFences = reMatch( "```json\s*[\s\S]*?```", rawText );
+
+            if ( jsonFences.len() ) {
+                jsonText = reReplace( jsonFences[ 1 ], "^```json[ \t]*", "" );
+                jsonText = trim( reReplace( jsonText, "```$", "" ) );
+            } else {
+                // No fence: accept only a brace that opens directly onto a quoted key.
+                var bareMatches = reMatch( '\{\s*"(?:diagnosis|summary|confidence)"[\s\S]*?\}', rawText );
+                if ( bareMatches.len() ) {
+                    jsonText = bareMatches[ 1 ];
+                }
+            }
+
+            if ( len( jsonText ) ) {
                 try {
-                    parsedMeta = jsonDeserialize( jsonMatches[ 1 ] );
+                    parsedMeta = jsonDeserialize( jsonText );
                 } catch( any e ) {
                     parsedMeta = {};
                 }
             }
         }
 
-        // 5. Automatic Fallback: Handle Quota/Rate-Limit Outage Gracefully
+        // 5. Automatic Fallback: Handle Quota/Rate-Limit Outage Gracefully.
+        //    repairMode records honestly which path produced the code, so we never
+        //    claim the AI fixed something the hardcoded fallback actually fixed.
+        var repairMode = "ai";
+
         if ( len( trim( repairedCode ) ) == 0 ) {
+            repairMode = "fallback";
             // Deterministic NullPointerException remediation for developerName
             repairedCode = replace( originalSource, "String developerName = null;", "String developerName = ""Developer"";" );
             parsedMeta = {
@@ -118,19 +203,31 @@ class {
             };
         }
 
-        // 6. Safely write patch (MVP Boundary: max 1 file, must be .java)
-        if ( len( trim( repairedCode ) ) > 0 ) {
+        // 6. Safely write patch (MVP Boundary: max 1 file, must be .java).
+        //    Only report a changed file if the content genuinely differs -- writing an
+        //    identical file still leaves Git clean, and reporting it would make
+        //    SafetyGuard.validateChangedFiles() fail with a confusing mismatch.
+        var contentChanged = len( trim( repairedCode ) ) > 0
+            && trim( repairedCode ) != trim( originalSource );
+
+        if ( contentChanged ) {
             fileWrite( targetFullPath, trim( repairedCode ) );
             changedFiles.append( targetRelativePath );
         }
 
-        // 7. Return the agreed RepairResult contract for Person C
+        // 7. Return the agreed RepairResult contract.
+        //    `repaired` is the field SafetyGuard reads; `safeToVerify` is kept as an alias.
+        var repaired = ( changedFiles.len() == 1 );
+
         return {
-            "diagnosis": parsedMeta.diagnosis ?: "Handled null reference on developerName",
+            "diagnosis"   : parsedMeta.diagnosis ?: "Handled null reference on developerName",
             "changedFiles": changedFiles,
-            "summary": parsedMeta.summary ?: "Initialized developerName variable to prevent crash",
-            "confidence": parsedMeta.confidence ?: "high",
-            "safeToVerify": ( changedFiles.len() == 1 )
+            "summary"     : parsedMeta.summary ?: "Initialized developerName variable to prevent crash",
+            "confidence"  : parsedMeta.confidence ?: "high",
+            "repaired"    : repaired,
+            "repairMode"  : repaired ? repairMode : "none",
+            "apiError"    : apiError,
+            "safeToVerify": repaired
         };
     }
 }

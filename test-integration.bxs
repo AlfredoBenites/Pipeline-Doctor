@@ -1,0 +1,147 @@
+/**
+ * Focused integration test for the Pipeline Doctor contract fixes and stop conditions.
+ *
+ *   boxlang test-integration.bxs
+ *
+ * Runs entirely against throwaway repositories in the temp directory. It never touches
+ * ../pipeline-doctor-demo, never calls the AI, and never creates a branch or pull request.
+ *
+ * Exit code 0 when every check passes, 1 otherwise.
+ */
+
+import src.CommandRunner;
+import src.FailureContext;
+import src.Pipeline;
+import src.publisher.SafetyGuard;
+
+passed  = 0;
+failed  = 0;
+results = [];
+
+function check( required string label, required boolean condition, string detail = "" ) {
+    if ( arguments.condition ) {
+        variables.passed++;
+        variables.results.append( "  PASS  " & arguments.label );
+    } else {
+        variables.failed++;
+        variables.results.append( "  FAIL  " & arguments.label & ( len( arguments.detail ) ? "  -> " & arguments.detail : "" ) );
+    }
+}
+
+function sh( required string name, required array args, required string dir ) {
+    return systemExecute( name: arguments.name, arguments: arguments.args, directory: arguments.dir, timeout: 30, terminateOnTimeout: true );
+}
+
+/** Build a throwaway git repo containing a Java file and a config. */
+function makeRepo( required string javaSource, required string configJson ) {
+    var dir = getTempDirectory() & "/pd-test-" & createUUID();
+    directoryCreate( dir & "/scr1", true );
+    fileWrite( dir & "/scr1/App.java", arguments.javaSource );
+    if ( len( arguments.configJson ) ) {
+        fileWrite( dir & "/pipeline-doctor.json", arguments.configJson );
+    }
+    sh( "git", [ "init", "-b", "main" ], dir );
+    sh( "git", [ "config", "user.email", "test@example.com" ], dir );
+    sh( "git", [ "config", "user.name", "Pipeline Doctor Test" ], dir );
+    sh( "git", [ "add", "-A" ], dir );
+    sh( "git", [ "commit", "-m", "initial" ], dir );
+    return dir;
+}
+
+BROKEN = 'public class App {
+    public static void main(String[] args) {
+        String developerName = null;
+        System.out.println("Welcome, " + developerName.toUpperCase());
+    }
+}';
+
+WORKING = 'public class App {
+    public static void main(String[] args) {
+        System.out.println("all good");
+    }
+}';
+
+CONFIG_JSON = '{"executable":"java","arguments":["scr1/App.java"],"timeoutSeconds":60,"allowedExtensions":["java"],"maxFilesChanged":1,"baseBranch":"main"}';
+
+println( repeatString( "=", 78 ) );
+println( "  PIPELINE DOCTOR - INTEGRATION TEST" );
+println( repeatString( "=", 78 ) );
+
+// --- Contract: CommandRunner must expose `succeeded` on BOTH paths ----------------------
+repo   = makeRepo( BROKEN, CONFIG_JSON );
+parsedConfig = jsonDeserialize( CONFIG_JSON );
+run    = new src.CommandRunner().run( parsedConfig, repo );
+
+check( "CommandRunner exposes 'succeeded'", run.keyExists( "succeeded" ) );
+check( "CommandRunner keeps 'success' alias", run.keyExists( "success" ) );
+check( "CommandRunner reports the failure", run.succeeded == false && run.exitCode != 0, "exit=" & run.exitCode );
+
+badConfig  = { executable: "definitely-not-a-real-binary-xyz", arguments: [ "x" ], timeoutSeconds: 5 };
+erroredRun = new src.CommandRunner().run( badConfig, repo );
+check( "CommandRunner error path exposes 'succeeded'", erroredRun.keyExists( "succeeded" ) && erroredRun.succeeded == false );
+
+// --- Contract: FailureContext must use the configured repository-relative path ----------
+context = new src.FailureContext().build( run, repo, parsedConfig );
+
+check( "FailureContext found the source", context.contextFound, context.reason ?: "" );
+check( "candidateFiles uses the config-relative path", context.candidateFiles[ 1 ] == "scr1/App.java", "got " & context.candidateFiles[ 1 ] );
+check( "sourceSnippets keyed by the same relative path", context.sourceSnippets.keyExists( "scr1/App.java" ) );
+check( "source code was actually read", findNoCase( "developerName", context.sourceSnippets[ "scr1/App.java" ] ) > 0 );
+check( "line number captured", context.lineNumber == "4", "got " & context.lineNumber );
+
+mismatch = duplicate( run );
+mismatch.combinedOutput = "Exception at Other.main(Other.java:9)";
+check( "mismatched source file is rejected", !new src.FailureContext().build( mismatch, repo, parsedConfig ).contextFound );
+
+// --- Contract: SafetyGuard reads `repaired` and catches unexpected files ----------------
+guard = new src.publisher.SafetyGuard();
+
+check( "SafetyGuard rejects repaired:false", !guard.validateForPublish(
+    { diagnosis: "d", summary: "s", changedFiles: [ "scr1/App.java" ], repaired: false },
+    { exitCode: 0, succeeded: true } ).safe );
+
+check( "SafetyGuard rejects failed verification", !guard.validateForPublish(
+    { diagnosis: "d", summary: "s", changedFiles: [ "scr1/App.java" ], repaired: true },
+    { exitCode: 1, succeeded: false } ).safe );
+
+check( "SafetyGuard accepts a verified repair", guard.validateForPublish(
+    { diagnosis: "d", summary: "s", changedFiles: [ "scr1/App.java" ], repaired: true },
+    { exitCode: 0, succeeded: true } ).safe );
+
+check( "SafetyGuard rejects an unreported changed file",
+    !guard.validateChangedFiles( [ "scr1/App.java" ], [ "scr1/App.java", ".env" ] ).safe );
+
+// --- Pipeline stop conditions (none reach the AI or create a branch) --------------------
+println( "" );
+println( "-- Exercising pipeline stop conditions (the output below is expected)" );
+
+r1 = new src.Pipeline().run( makeRepo( BROKEN, "" ), true );
+check( "stops when pipeline-doctor.json is missing", r1.status == "stopped" && ( r1.stage ?: "" ) == "config", r1.stage ?: "" );
+
+r2 = new src.Pipeline().run( makeRepo( BROKEN, "{ not valid json" ), true );
+check( "stops when the config is invalid JSON", r2.status == "stopped" && ( r2.stage ?: "" ) == "config", r2.stage ?: "" );
+
+dirtyRepo = makeRepo( BROKEN, CONFIG_JSON );
+fileWrite( dirtyRepo & "/scr1/App.java", BROKEN & char( 10 ) & "// uncommitted edit" );
+r3 = new src.Pipeline().run( dirtyRepo, true );
+check( "stops when the repository is dirty", r3.status == "stopped" && ( r3.stage ?: "" ) == "preconditions", r3.stage ?: "" );
+
+wrongBranchRepo = makeRepo( BROKEN, CONFIG_JSON );
+sh( "git", [ "switch", "-c", "some-other-branch" ], wrongBranchRepo );
+r4 = new src.Pipeline().run( wrongBranchRepo, true );
+check( "stops when not on the base branch", r4.status == "stopped" && ( r4.stage ?: "" ) == "preconditions", r4.stage ?: "" );
+
+r5 = new src.Pipeline().run( makeRepo( WORKING, CONFIG_JSON ), true );
+check( "stops when the command already succeeds", r5.status == "stopped" && ( r5.stage ?: "" ) == "reproduce", r5.stage ?: "" );
+
+// --- Report ----------------------------------------------------------------------------
+println( "" );
+println( repeatString( "=", 78 ) );
+println( "  RESULTS" );
+println( repeatString( "=", 78 ) );
+results.each( line => println( line ) );
+println( "" );
+println( "  " & passed & " passed, " & failed & " failed" );
+println( repeatString( "=", 78 ) );
+
+cliExit( failed == 0 ? 0 : 1 );

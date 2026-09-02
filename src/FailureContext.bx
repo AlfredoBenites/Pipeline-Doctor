@@ -1,9 +1,19 @@
 class {
 
+    /**
+     * Build the failure context handed to the RepairAgent.
+     *
+     * @commandResult Result from CommandRunner.run()
+     * @repoPath      Absolute path to the target repository
+     * @config        The target's pipeline-doctor.json
+     */
     function build( required commandResult, required repoPath, required config ) {
 
         failureOutput = commandResult.combinedOutput;
 
+        // A Java stack trace only ever prints the bare file name and line, e.g. "App.java:4".
+        // We use it to confirm WHICH file failed and on what line, but it can never give us
+        // the repository-relative path -- that has to come from the configuration.
         match = reFind(
             "([A-Za-z0-9_]+\.java):([0-9]+)",
             failureOutput,
@@ -11,48 +21,85 @@ class {
             true
         );
 
+        // The path we are actually allowed to repair, straight from pipeline-doctor.json.
+        // Deliberately not hardcoded so this class stays reusable across target repositories.
+        relativeSourcePath = config.arguments[ 1 ];
+        sourcePath         = repoPath & "/" & relativeSourcePath;
+
         if ( arrayLen( match.match ) < 3 ) {
             return {
-                repoPath: repoPath,
-                failureOutput: failureOutput,
-                candidateFiles: [],
-                sourceSnippets: {},
-                lineNumber: "",
-                contextFound: false
+                repoPath          : repoPath,
+                failureOutput     : failureOutput,
+                candidateFiles    : [],
+                sourceSnippets    : {},
+                lineNumber        : "",
+                relativeSourcePath: relativeSourcePath,
+                contextFound      : false,
+                reason            : "No Java source reference found in the failure output."
             };
         }
 
-      fileName = match.match[ 2 ];
-lineNumber = match.match[ 3 ];
+        fileName   = match.match[ 2 ];
+        lineNumber = match.match[ 3 ];
 
-fileExtension = listLast( fileName, "." );
+        fileExtension = listLast( relativeSourcePath, "." );
 
-if ( !config.allowedExtensions.findNoCase( fileExtension ) ) {
-    return {
-        repoPath: repoPath,
-        failureOutput: failureOutput,
-        candidateFiles: [],
-        sourceSnippets: {},
-        lineNumber: lineNumber,
-        contextFound: false,
-        reason: "File extension is not allowed: " & fileExtension
-    };
-}
+        if ( !config.allowedExtensions.findNoCase( fileExtension ) ) {
+            return {
+                repoPath          : repoPath,
+                failureOutput     : failureOutput,
+                candidateFiles    : [],
+                sourceSnippets    : {},
+                lineNumber        : lineNumber,
+                relativeSourcePath: relativeSourcePath,
+                contextFound      : false,
+                reason            : "File extension is not allowed: " & fileExtension
+            };
+        }
 
-relativeSourcePath = config.arguments[ 1 ];
-sourcePath = repoPath & "/" & relativeSourcePath;
+        // The stack trace names a file; make sure it is the one the configuration points at,
+        // otherwise we would be repairing something the operator never permitted.
+        if ( getFileFromPath( relativeSourcePath ) != fileName ) {
+            return {
+                repoPath          : repoPath,
+                failureOutput     : failureOutput,
+                candidateFiles    : [],
+                sourceSnippets    : {},
+                lineNumber        : lineNumber,
+                relativeSourcePath: relativeSourcePath,
+                contextFound      : false,
+                reason            : "Failure points at " & fileName &
+                    ", but the configured source file is " & relativeSourcePath & "."
+            };
+        }
+
+        if ( !fileExists( sourcePath ) ) {
+            return {
+                repoPath          : repoPath,
+                failureOutput     : failureOutput,
+                candidateFiles    : [],
+                sourceSnippets    : {},
+                lineNumber        : lineNumber,
+                relativeSourcePath: relativeSourcePath,
+                contextFound      : false,
+                reason            : "Configured source file not found: " & relativeSourcePath
+            };
+        }
 
         sourceCode = fileRead( sourcePath );
 
+        // candidateFiles and the sourceSnippets key both use the repository-relative path,
+        // so the RepairAgent can join it to the repo root and land on the real file.
         failureContext = {
-            repoPath: repoPath,
-            failureOutput: failureOutput,
-            candidateFiles: [ fileName ],
-            sourceSnippets: {
-                "#fileName#": sourceCode
+            repoPath          : repoPath,
+            failureOutput     : failureOutput,
+            candidateFiles    : [ relativeSourcePath ],
+            sourceSnippets    : {
+                "#relativeSourcePath#": sourceCode
             },
-            lineNumber: lineNumber,
-            contextFound: true
+            lineNumber        : lineNumber,
+            relativeSourcePath: relativeSourcePath,
+            contextFound      : true
         };
 
         return failureContext;
