@@ -5,6 +5,24 @@ class {
      * @failureContext struct: { repoPath, failureOutput, candidateFiles, sourceSnippets }
      * @return struct matching the RepairResult contract
      */
+    /**
+     * Pull "(daily limit N)" out of a Gemini QuotaFailure payload, when present.
+     */
+    private string function extractQuotaLimit( required struct responseJson ) {
+        try {
+            for ( var detail in ( arguments.responseJson.error.details ?: [] ) ) {
+                if ( ( detail[ "@type" ] ?: "" ) contains "QuotaFailure" ) {
+                    var value = detail.violations[ 1 ].quotaValue ?: "";
+                    if ( len( value ) ) {
+                        return " (free-tier limit: " & value & " requests/day)";
+                    }
+                }
+            }
+        } catch ( any ignored ) {
+        }
+        return "";
+    }
+
     function repair( struct failureContext ) {
         var repoRoot = getCanonicalPath( arguments.failureContext.repoPath );
         var changedFiles = [];
@@ -64,8 +82,9 @@ class {
         var tempPayloadPath = getTempDirectory() & "/gemini_req_" & createUUID() & ".json";
         fileWrite( tempPayloadPath, requestPayload.toJson() );
 
-        var rawText  = "";
-        var apiError = "";
+        var rawText        = "";
+        var apiError       = "";
+        var quotaExhausted = false;
 
         // Gemini intermittently answers "high demand" for a few seconds at a time.
         // A couple of quick retries turns a spurious fallback into a real AI repair.
@@ -108,7 +127,19 @@ class {
                         }
                     } else if ( structKeyExists( responseJson, "error" ) ) {
                         // Surface the reason instead of silently sliding into the fallback.
+                        var errorStatus = responseJson.error.status ?: "";
                         apiError = responseJson.error.message ?: "Unknown API error";
+
+                        // RESOURCE_EXHAUSTED means the API key is out of quota. Retrying
+                        // cannot fix that and each attempt may burn another request, so
+                        // stop immediately and say so in plain language.
+                        if ( errorStatus == "RESOURCE_EXHAUSTED" || ( responseJson.error.code ?: 0 ) == 429 ) {
+                            quotaExhausted = true;
+                            apiError = "Gemini API quota exhausted for this key" &
+                                extractQuotaLimit( responseJson ) &
+                                ". This is a billing/quota limit, not a bug - retrying will not help. " &
+                                "Wait for the quota to reset or enable billing on the Google AI project.";
+                        }
                     }
                 }
             } catch( any e ) {
@@ -118,6 +149,11 @@ class {
 
             if ( len( trim( rawText ) ) > 0 ) {
                 apiError = "";
+                break;
+            }
+
+            // Never spend another request on a quota error.
+            if ( quotaExhausted ) {
                 break;
             }
 
