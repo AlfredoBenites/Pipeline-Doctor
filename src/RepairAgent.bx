@@ -6,6 +6,99 @@ class {
      * @return struct matching the RepairResult contract
      */
     /**
+     * Decide which AI provider to use, based purely on which key is in .env.
+     *
+     * Order: GROQ_API_KEY, then OPENROUTER_API_KEY, then GEMINI_API_KEY.
+     * Override the model per provider with AI_MODEL.
+     *
+     * Groq and OpenRouter both speak the OpenAI chat-completions format, so any other
+     * OpenAI-compatible service works by pointing AI_BASE_URL at it.
+     *
+     * @return struct with name, apiKey, url, headers[], and buildPayload( prompt )
+     */
+    private struct function resolveProvider() {
+        var modelOverride = getSystemSetting( "AI_MODEL", "" );
+
+        var groqKey = getSystemSetting( "GROQ_API_KEY", "" );
+        if ( len( groqKey ) ) {
+            return openAiCompatible(
+                "groq",
+                groqKey,
+                getSystemSetting( "AI_BASE_URL", "https://api.groq.com/openai/v1/chat/completions" ),
+                len( modelOverride ) ? modelOverride : "llama-3.3-70b-versatile"
+            );
+        }
+
+        var openRouterKey = getSystemSetting( "OPENROUTER_API_KEY", "" );
+        if ( len( openRouterKey ) ) {
+            return openAiCompatible(
+                "openrouter",
+                openRouterKey,
+                getSystemSetting( "AI_BASE_URL", "https://openrouter.ai/api/v1/chat/completions" ),
+                len( modelOverride ) ? modelOverride : "meta-llama/llama-3.3-70b-instruct:free"
+            );
+        }
+
+        var geminiKey = getSystemSetting( "GEMINI_API_KEY", "" );
+        var model     = len( modelOverride ) ? modelOverride : "gemini-3.6-flash";
+
+        return {
+            "name"        : "gemini",
+            "apiKey"      : geminiKey,
+            "model"       : model,
+            // Gemini takes the key in the query string, so no auth header.
+            "url"         : "https://generativelanguage.googleapis.com/v1beta/models/" &
+                            model & ":generateContent?key=" & geminiKey,
+            "headers"     : [],
+            "buildPayload": ( required string prompt ) => {
+                return { "contents": [ { "parts": [ { "text": prompt } ] } ] };
+            }
+        };
+    }
+
+    /**
+     * Build a provider descriptor for any OpenAI-compatible chat-completions endpoint.
+     */
+    private struct function openAiCompatible(
+        required string name,
+        required string apiKey,
+        required string url,
+        required string model
+    ) {
+        var chosenModel = arguments.model;
+
+        return {
+            "name"        : arguments.name,
+            "apiKey"      : arguments.apiKey,
+            "model"       : chosenModel,
+            "url"         : arguments.url,
+            "headers"     : [ "Authorization: Bearer " & arguments.apiKey ],
+            "buildPayload": ( required string prompt ) => {
+                return {
+                    "model"   : chosenModel,
+                    "messages": [ { "role": "user", "content": prompt } ]
+                };
+            }
+        };
+    }
+
+    /**
+     * A repair result that changed nothing, with an explanation.
+     */
+    private struct function abortResult( required string diagnosis, required string summary ) {
+        return {
+            "diagnosis"   : arguments.diagnosis,
+            "changedFiles": [],
+            "summary"     : arguments.summary,
+            "confidence"  : "low",
+            "repaired"    : false,
+            "repairMode"  : "none",
+            "apiError"    : arguments.diagnosis,
+            "safeToVerify": false
+        };
+    }
+
+    /**
      * Pull "(daily limit N)" out of a Gemini QuotaFailure payload, when present.
      */
     private string function extractQuotaLimit( required struct responseJson ) {
@@ -60,24 +153,25 @@ class {
             & "\n\nFile to fix (" & targetRelativePath & "):\n"
             & originalSource;
 
-        // 3. Make Gemini API Call using temporary payload buffer
-        var apiKey = getSystemSetting( "GEMINI_API_KEY", "" );
+        // 3. Pick a provider and build its request.
+        //    Whichever key is present in .env wins, in this order. This lets you swap
+        //    providers without touching code -- useful when one runs out of free quota.
+        var provider = resolveProvider();
+
+        if ( !len( provider.apiKey ) ) {
+            return abortResult(
+                "No AI API key found. Set one of GROQ_API_KEY, OPENROUTER_API_KEY, or GEMINI_API_KEY in .env.",
+                "No API key configured."
+            );
+        }
 
         // A real repair prompt against a thinking model takes ~15s; the previous 10s
         // budget killed curl mid-flight, which produced empty output and made every
         // run silently fall back. Give it room, and let the caller override.
         var apiTimeoutSeconds = arguments.failureContext.apiTimeoutSeconds ?: 60;
-        var apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=" & apiKey;
-
-        var requestPayload = {
-            "contents": [
-                {
-                    "parts": [
-                        { "text": userPrompt }
-                    ]
-                }
-            ]
-        };
+        var apiUrl         = provider.url;
+        var requestPayload = provider.buildPayload( userPrompt );
+        var authHeaders    = provider.headers;
 
         var tempPayloadPath = getTempDirectory() & "/gemini_req_" & createUUID() & ".json";
         fileWrite( tempPayloadPath, requestPayload.toJson() );
@@ -92,16 +186,23 @@ class {
 
         for ( var attempt = 1; attempt <= maxAttempts; attempt++ ) {
             try {
+                var curlArgs = [
+                    "-s",
+                    "-m", toString( apiTimeoutSeconds ),
+                    "-X", "POST",
+                    apiUrl,
+                    "-H", "Content-Type: application/json"
+                ];
+                for ( var header in authHeaders ) {
+                    curlArgs.append( "-H" );
+                    curlArgs.append( header );
+                }
+                curlArgs.append( "--data-binary" );
+                curlArgs.append( "@" & tempPayloadPath );
+
                 var execResult = systemExecute(
                     name = "curl",
-                    arguments = [
-                        "-s",
-                        "-m", toString( apiTimeoutSeconds ),
-                        "-X", "POST",
-                        apiUrl,
-                        "-H", "Content-Type: application/json",
-                        "--data-binary", "@" & tempPayloadPath
-                    ],
+                    arguments = curlArgs,
                     timeout            = apiTimeoutSeconds + 10,
                     terminateOnTimeout = true
                 );
@@ -116,8 +217,9 @@ class {
                     var responseJson = jsonDeserialize( out );
 
                     if ( structKeyExists( responseJson, "candidates" ) && responseJson.candidates.len() > 0 ) {
-                        // Thinking models can return a reasoning part before the answer part,
-                        // so parts[1] is not reliably the text. Take the first part that has any.
+                        // Gemini shape. Thinking models can return a reasoning part before the
+                        // answer part, so parts[1] is not reliably the text -- take the first
+                        // part that actually has any.
                         var parts = responseJson.candidates[ 1 ].content.parts ?: [];
                         for ( var part in parts ) {
                             if ( structKeyExists( part, "text" ) && len( trim( part.text ) ) ) {
@@ -125,6 +227,9 @@ class {
                                 break;
                             }
                         }
+                    } else if ( structKeyExists( responseJson, "choices" ) && responseJson.choices.len() > 0 ) {
+                        // OpenAI-compatible shape (Groq, OpenRouter, Together, Cerebras...).
+                        rawText = responseJson.choices[ 1 ].message.content ?: "";
                     } else if ( structKeyExists( responseJson, "error" ) ) {
                         // Surface the reason instead of silently sliding into the fallback.
                         var errorStatus = responseJson.error.status ?: "";
@@ -262,6 +367,8 @@ class {
             "confidence"  : parsedMeta.confidence ?: "high",
             "repaired"    : repaired,
             "repairMode"  : repaired ? repairMode : "none",
+            "provider"    : provider.name,
+            "model"       : provider.model,
             "apiError"    : apiError,
             "safeToVerify": repaired
         };

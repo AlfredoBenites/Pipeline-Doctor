@@ -295,7 +295,8 @@ class {
     private function reportRepairMode( required struct repair ) {
         var label = "nothing";
         if ( arguments.repair.repairMode == "ai" ) {
-            label = "REAL AI (Gemini)";
+            label = "REAL AI (" & ( arguments.repair.provider ?: "unknown" ) &
+                    " / " & ( arguments.repair.model ?: "?" ) & ")";
         } else if ( arguments.repair.repairMode == "fallback" ) {
             label = "HARDCODED FALLBACK - not AI";
         }
@@ -338,7 +339,9 @@ class {
         required struct secondRun
     ) {
         var nl     = char( 10 );
-        var source = arguments.repair.repairMode == "ai" ? "AI (Gemini)" : "deterministic fallback";
+        var source = arguments.repair.repairMode == "ai"
+            ? "AI (" & ( arguments.repair.provider ?: "unknown" ) & " / " & ( arguments.repair.model ?: "?" ) & ")"
+            : "deterministic fallback";
 
         return "## Pipeline Doctor automated repair" & nl & nl &
             "**Diagnosis**" & nl & arguments.repair.diagnosis & nl & nl &
